@@ -1,7 +1,7 @@
 # CS-Toolbox-Launcher-FromZip.ps1
 # Bootstrapper for ConnectSecure Technician Toolbox (prod-01-01)
 # - Downloads prod-01-01.zip
-# - Verifies SHA-256 hash
+# - Verifies SHA-256 hash BEFORE extracting
 # - Extracts to C:\CS-Toolbox-TEMP\prod-01-01
 # - Launches CS-Toolbox-Launcher.ps1 in the SAME PowerShell window (dot-sourced)
 # - Handles nested folders in the ZIP and unblocks files
@@ -9,12 +9,12 @@
 # --------------------------
 # Config
 # --------------------------
-$ZipUrl          = 'https://github.com/dmooney-cs/dev01/raw/refs/heads/main/prod-01-01.zip'  # RAW file url
-$ExpectedSHA256  = 'd8b3055ae1a1bb8ce2c0604ae8962dd108164ac5f9b9b24db1cfc0d795046db99'        # known-good hash
-$ZipPath         = Join-Path $env:TEMP 'prod-01-01.zip'
-$ExtractPath     = 'C:\CS-Toolbox-TEMP'
-$DestRoot        = Join-Path $ExtractPath 'prod-01-01'
-$Launcher        = Join-Path $DestRoot 'CS-Toolbox-Launcher.ps1'
+$ZipUrl         = 'https://github.com/dmooney-cs/dev01/raw/refs/heads/main/prod-01-01.zip'  # RAW file url
+$ExpectedSHA256 = 'd8b3055ae1a1bb8ce2c0604ae8962dd108164ac5f9b9b24db1cfc0d795046db9'        # known-good hash
+$ZipPath        = Join-Path $env:TEMP 'prod-01-01.zip'
+$ExtractPath    = 'C:\CS-Toolbox-TEMP'
+$DestRoot       = Join-Path $ExtractPath 'prod-01-01'
+$Launcher       = Join-Path $DestRoot 'CS-Toolbox-Launcher.ps1'
 
 # --------------------------
 # Prompt user
@@ -64,7 +64,7 @@ try {
 }
 
 # --------------------------
-# Verify SHA-256
+# Verify SHA-256 BEFORE extracting
 # --------------------------
 function Get-ZipSHA256([string]$Path) {
     try {
@@ -83,15 +83,23 @@ function Get-ZipSHA256([string]$Path) {
     }
 }
 
+# Normalize and validate the expected hash string
+$ExpectedSHA256 = $ExpectedSHA256.Trim().ToLower()
+if ($ExpectedSHA256 -notmatch '^[0-9a-f]{64}$') {
+    Write-Host '❌ ERROR: Invalid expected SHA-256 format. Please contact ConnectSecure support.' -ForegroundColor Red
+    try { Remove-Item -LiteralPath $ZipPath -Force -ErrorAction SilentlyContinue } catch { }
+    return
+}
+
 try {
     if (-not (Test-Path -LiteralPath $ZipPath)) {
         throw "Downloaded file not found at $ZipPath"
     }
     $actual = Get-ZipSHA256 -Path $ZipPath
-    if ($actual -ne $ExpectedSHA256.ToLower()) {
+    if ($actual -ne $ExpectedSHA256) {
         Write-Host '❌ ERROR: Download integrity check failed.' -ForegroundColor Red
         Write-Host ("Expected SHA-256: {0}" -f $ExpectedSHA256) -ForegroundColor Yellow
-        Write-Host ("Actual   SHA-256: {0}" -f $actual) -ForegroundColor Yellow
+        Write-Host ("Actual   SHA-256: {0}" -f $actual)         -ForegroundColor Yellow
         try { Remove-Item -LiteralPath $ZipPath -Force -ErrorAction SilentlyContinue } catch { }
         Write-Host 'Please contact ConnectSecure support.' -ForegroundColor Red
         return
@@ -106,11 +114,10 @@ try {
 }
 
 # --------------------------
-# Extract ZIP
+# Extract ZIP (only after passing hash check)
 # --------------------------
 Write-Host 'Extracting toolbox...' -ForegroundColor Cyan
 try {
-    # Extract into ExtractPath; we will normalize into $DestRoot next
     Expand-Archive -Path $ZipPath -DestinationPath $ExtractPath -Force
 } catch {
     Write-Host ('❌ ERROR: Extract failed: {0}' -f $_.Exception.Message) -ForegroundColor Red
