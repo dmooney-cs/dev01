@@ -1,40 +1,52 @@
 # CS-Toolbox-Launcher-FromZip.ps1
-# Downloads, verifies SHA-256 (BEFORE extract), extracts, launches
+# Downloads, verifies SHA-256 (BEFORE extract), extracts, normalizes, launches
 
 # --------------------------
 # Config
 # --------------------------
 $ZipUrl         = 'https://github.com/dmooney-cs/dev01/raw/refs/heads/main/prod-01-01.zip'
-$ExpectedSHA256 = 'd8b3055ae1a1bb8ce2c0604ae8962dd108164ac5f9b9b24db1cfc0d795046db9'  # <-- 64 hex chars
+$ExpectedSHA256 = 'd8b3055ae1a1bb8ce2c0604ae8962dd108164ac5f9b9b24db1cfc0d795046db8'  # 64 hex chars
 $ExtractPath    = 'C:\CS-Toolbox-TEMP'
 $DestRoot       = Join-Path $ExtractPath 'prod-01-01'
-$ZipPath        = Join-Path $ExtractPath  'prod-01-01.zip'  # <-- put the ZIP next to the folder we control
+$ZipPath        = Join-Path $ExtractPath 'prod-01-01.zip'   # keep ZIP alongside extracted folder
 $Launcher       = Join-Path $DestRoot 'CS-Toolbox-Launcher.ps1'
+
+# Quieter progress for Invoke-WebRequest
 $ProgressPreference = 'SilentlyContinue'
 
 Write-Host ("Using ExtractPath: {0}" -f $ExtractPath) -ForegroundColor DarkGray
 Write-Host ("Using ZipPath    : {0}" -f $ZipPath)     -ForegroundColor DarkGray
 
+# --------------------------
 # Prompt
+# --------------------------
 $response = Read-Host 'Download and install the ConnectSecure Technician Toolbox (prod-01-01)? (Y/N)'
 if ($response -notin @('Y','y')) { Write-Host 'Aborted by user.' -ForegroundColor Yellow; return }
 
+# --------------------------
 # TLS
+# --------------------------
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch { }
 
+# --------------------------
 # Ensure base folder
+# --------------------------
 if (-not (Test-Path -LiteralPath $ExtractPath)) {
   try { New-Item -Path $ExtractPath -ItemType Directory -Force | Out-Null }
   catch { Write-Host ("❌ ERROR: Failed to create {0}: {1}" -f $ExtractPath, $_.Exception.Message) -ForegroundColor Red; return }
 }
 
-# Clean dest folder
+# --------------------------
+# Clean dest folder (avoid stale files)
+# --------------------------
 if (Test-Path -LiteralPath $DestRoot) {
   try { Remove-Item -LiteralPath $DestRoot -Recurse -Force -ErrorAction Stop }
   catch { Write-Host ("⚠️ WARN: Could not remove {0}: {1}" -f $DestRoot, $_.Exception.Message) -ForegroundColor Yellow }
 }
 
+# --------------------------
 # Download
+# --------------------------
 Write-Host 'Downloading toolbox...' -ForegroundColor Cyan
 try {
   if (Test-Path -LiteralPath $ZipPath) { Remove-Item -LiteralPath $ZipPath -Force -ErrorAction SilentlyContinue }
@@ -44,7 +56,9 @@ try {
   return
 }
 
+# --------------------------
 # Validate expected hash string
+# --------------------------
 $ExpectedSHA256 = $ExpectedSHA256.Trim().ToLower()
 Write-Host ("Expected SHA-256: {0} (len={1})" -f $ExpectedSHA256, $ExpectedSHA256.Length) -ForegroundColor DarkGray
 if ($ExpectedSHA256 -notmatch '^[0-9a-f]{64}$') {
@@ -53,10 +67,14 @@ if ($ExpectedSHA256 -notmatch '^[0-9a-f]{64}$') {
   return
 }
 
+# --------------------------
 # Compute actual SHA-256 (BEFORE extract)
+# --------------------------
 function Get-ZipSHA256([string]$Path) {
-  try { (Get-FileHash -Algorithm SHA256 -LiteralPath $Path -ErrorAction Stop).Hash.ToLower() }
-  catch {
+  try {
+    (Get-FileHash -Algorithm SHA256 -LiteralPath $Path -ErrorAction Stop).Hash.ToLower()
+  } catch {
+    # .NET fallback (restricted shells)
     $sha = [System.Security.Cryptography.SHA256]::Create()
     $fs  = [System.IO.File]::OpenRead($Path)
     try { -join ($sha.ComputeHash($fs) | ForEach-Object { $_.ToString('x2') }) }
@@ -85,14 +103,82 @@ try {
   return
 }
 
+# --------------------------
 # Extract after pass
+# --------------------------
 Write-Host 'Extracting toolbox...' -ForegroundColor Cyan
-try { Expand-Archive -Path $ZipPath -DestinationPath $ExtractPath -Force }
-catch { Write-Host ("❌ ERROR: Extract failed: {0}" -f $_.Exception.Message) -ForegroundColor Red; return }
-finally { try { Remove-Item -LiteralPath $ZipPath -Force -ErrorAction SilentlyContinue } catch { } }
+try {
+  Expand-Archive -Path $ZipPath -DestinationPath $ExtractPath -Force
+} catch {
+  Write-Host ("❌ ERROR: Extract failed: {0}" -f $_.Exception.Message) -ForegroundColor Red
+  return
+} finally {
+  try { Remove-Item -LiteralPath $ZipPath -Force -ErrorAction SilentlyContinue } catch { }
+}
 
-# Ensure destination
+# --------------------------
+# Ensure destination exists for normalization
+# --------------------------
 if (-not (Test-Path -LiteralPath $DestRoot)) { New-Item -Path $DestRoot -ItemType Directory -Force | Out-Null }
 
-# Normalize folder structure (unchanged from before) ...
-# [snip for brevity — keep your existing Move-Contents and normalization blocks]
+# --------------------------
+# Normalize folder structure
+# Handles:
+#  - ZIP already contains prod-01-01/
+#  - Single nested folder with contents
+#  - Mixed content at ExtractPath
+# --------------------------
+function Move-Contents([string]$Source, [string]$Target) {
+  if (-not (Test-Path -LiteralPath $Source)) { return }
+  Get-ChildItem -LiteralPath $Source -Force | ForEach-Object {
+    try { Move-Item -LiteralPath $_.FullName -Destination $Target -Force }
+    catch { Write-Host ("⚠️ WARN: Failed to move {0} -> {1}: {2}" -f $_.FullName, $Target, $_.Exception.Message) -ForegroundColor Yellow }
+  }
+}
+
+$alreadyGood = Test-Path -LiteralPath (Join-Path $DestRoot 'CS-Toolbox-Launcher.ps1')
+if (-not $alreadyGood) {
+  $topDirs  = Get-ChildItem -LiteralPath $ExtractPath -Directory -Force | Where-Object { $_.FullName -ne $DestRoot }
+  $topFiles = Get-ChildItem -LiteralPath $ExtractPath -File -Force | Where-Object { $_.FullName -ne $ZipPath }
+
+  if ($topDirs.Count -eq 1 -and $topFiles.Count -eq 0) {
+    # Single nested folder — move its contents into DestRoot
+    Move-Contents -Source $topDirs[0].FullName -Target $DestRoot
+    try { Remove-Item -LiteralPath $topDirs[0].FullName -Recurse -Force -ErrorAction SilentlyContinue } catch { }
+  } else {
+    # Mixed or files at root — move everything except the zip and DestRoot into DestRoot
+    foreach ($d in $topDirs) { Move-Contents -Source $d.FullName -Target $DestRoot }
+    foreach ($f in $topFiles) { try { Move-Item -LiteralPath $f.FullName -Destination $DestRoot -Force } catch { } }
+    foreach ($d in $topDirs) { try { Remove-Item -LiteralPath $d.FullName -Recurse -Force -ErrorAction SilentlyContinue } catch { } }
+  }
+}
+
+# --------------------------
+# Unblock all extracted files (avoid execution warnings)
+# --------------------------
+try {
+  Get-ChildItem -LiteralPath $DestRoot -Recurse -Force -File | ForEach-Object {
+    try { Unblock-File -LiteralPath $_.FullName -ErrorAction SilentlyContinue } catch { }
+  }
+} catch { }
+
+# --------------------------
+# Verify launcher exists
+# --------------------------
+if (-not (Test-Path -LiteralPath $Launcher)) {
+  Write-Host ("❌ ERROR: Launcher not found: {0}" -f $Launcher) -ForegroundColor Red
+  Write-Host 'Please verify the ZIP contents or try again.' -ForegroundColor Yellow
+  return
+}
+
+# --------------------------
+# Launch in SAME window
+# --------------------------
+Write-Host '✅ Download & extraction complete.' -ForegroundColor Green
+$null = Read-Host 'Press ENTER to launch the ConnectSecure Technician Toolbox'
+
+try { . $Launcher }
+catch {
+  Write-Host ("❌ ERROR launching Toolbox: {0}" -f $_.Exception.Message) -ForegroundColor Red
+  $null = Read-Host 'Press ENTER to exit'
+}
