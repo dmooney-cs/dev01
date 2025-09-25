@@ -5,7 +5,7 @@
 # Config
 # --------------------------
 $ZipUrl         = 'https://github.com/dmooney-cs/dev01/raw/refs/heads/main/prod-01-01.zip'
-$ExpectedSHA256 = 'd8b3055ae1a1bb8ce2c0604ae8962dd108164ac5f9b9b24db1cfc0d795046db8'  # 64 hex chars
+$ExpectedSHA256 = 'd8b3055ae1a1bb8ce2c0604ae8962dd108164ac5f9b9b24db1cfc0d795046db9'  # 64 hex chars
 $ExtractPath    = 'C:\CS-Toolbox-TEMP'
 $DestRoot       = Join-Path $ExtractPath 'prod-01-01'
 $ZipPath        = Join-Path $ExtractPath 'prod-01-01.zip'   # keep ZIP alongside extracted folder
