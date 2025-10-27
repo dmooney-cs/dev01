@@ -38,8 +38,8 @@ if (-not (Test-Path -LiteralPath $ExtractPath)) {
     }
 }
 
-# Clean existing destination (avoid stale files)
-if (Test-Path -LiteralPath $DestRoot)) {
+# Clean existing destination (avoid stale files)  <-- fixed: removed extra ')'
+if (Test-Path -LiteralPath $DestRoot) {
     try {
         Remove-Item -LiteralPath $DestRoot -Recurse -Force -ErrorAction Stop
     } catch {
