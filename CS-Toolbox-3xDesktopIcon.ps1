@@ -1,20 +1,21 @@
 <# =================================================================================================
- CS-Toolbox-3xDesktopIcon.ps1  (v1.6 - Toolbox-Launchers.zip ONLY)
+ CS-Toolbox-3xDesktopIcon.ps1  (v1.7 - uses proven bootstrapper strategy)
 
- One-liner (correct):
+ - Downloads Toolbox-Launchers.zip (3 attempts)
+ - Extracts to SYSTEM temp (C:\Windows\Temp)
+ - Normalizes folder structure (handles single top-level folder)
+ - Unblocks extracted files
+ - Copies:
+     • ALL .lnk -> interactive user's Desktop and/or Taskbar pinned folder
+     • ALL .ps1 -> C:\Temp
+   (auto-renames duplicates so nothing overwrites)
+
+ One-liner:
    irm https://raw.githubusercontent.com/dmooney-cs/dev01/main/CS-Toolbox-3xDesktopIcon.ps1 | iex
 
- Downloads (3 attempts) and validates:
-   https://github.com/dmooney-cs/dev01/raw/refs/heads/main/Toolbox-Launchers.zip
-
- Extracts to: C:\Windows\Temp\<unique>
- Copies:
-   - ALL .lnk -> interactive user's Desktop and/or Taskbar pinned folder
-   - ALL .ps1 -> C:\Temp
-
  Switches:
-   -ZipUrl     : override ZIP URL (optional)
-   -Desktop    : copy .lnk to Desktop
+   -ZipUrl     : override ZIP URL (default is Toolbox-Launchers.zip on dev01)
+   -Desktop    : copy .lnk to Desktop (default if no Desktop/Taskbar specified)
    -Taskbar    : copy .lnk to Taskbar pinned folder
    -Silent     : no prompts; minimal console output (still logs + exports summary)
    -ExportOnly : export JSON summary to C:\Temp\collected-info and exit
@@ -31,6 +32,7 @@ param(
     [switch]$Taskbar,
     [switch]$Silent,
 
+    # toolbox convention
     [switch]$ExportOnly
 )
 
@@ -62,6 +64,7 @@ function Write-Log {
     $ts = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
     $line = "[$ts][$Level] $Message"
     Add-Content -Path $script:LogFile -Value $line -Encoding UTF8
+
     if (-not $Silent) {
         switch ($Level) {
             'ERROR' { Write-Host $line -ForegroundColor Red }
@@ -100,91 +103,87 @@ function Get-FileHashSafe {
     (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
 }
 
-function Test-ZipPKSignature {
-    param([Parameter(Mandatory)][string]$Path)
-    $fs = [System.IO.File]::Open($Path,[System.IO.FileMode]::Open,[System.IO.FileAccess]::Read,[System.IO.FileShare]::ReadWrite)
-    try {
-        $buf = New-Object byte[] 2
-        $r = $fs.Read($buf,0,2)
-        if ($r -lt 2) { return $false }
-        return ([System.Text.Encoding]::ASCII.GetString($buf,0,2) -eq 'PK')
-    } finally { $fs.Dispose() }
-}
-
-function Test-ZipOpens {
-    param([Parameter(Mandatory)][string]$Path)
-    try {
-        Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue | Out-Null
-        $fs = [System.IO.File]::Open($Path,[System.IO.FileMode]::Open,[System.IO.FileAccess]::Read,[System.IO.FileShare]::ReadWrite)
-        try {
-            $zip = New-Object System.IO.Compression.ZipArchive($fs,[System.IO.Compression.ZipArchiveMode]::Read,$false)
-            try { $null = $zip.Entries.Count; return $true }
-            finally { $zip.Dispose() }
-        } finally { $fs.Dispose() }
-    } catch { return $false }
-}
-
-function Download-ZipWithRetry {
+# --------------------------
+# Proven: Download with retries (same pattern as working script)
+# --------------------------
+function Invoke-DownloadWithRetry {
     param(
-        [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$Url,
+        [Parameter(Mandatory)][string]$Uri,
         [Parameter(Mandatory)][string]$OutFile,
-        [int]$MaxAttempts = 3
+        [int]$MaxAttempts = 3,
+        [int]$DelaySeconds = 2
     )
 
-    # TLS hardening (PS 5.1)
-    try {
-        [Net.ServicePointManager]::SecurityProtocol =
-            [Net.SecurityProtocolType]::Tls12 -bor
-            [Net.SecurityProtocolType]::Tls11 -bor
-            [Net.SecurityProtocolType]::Tls
-    } catch {}
+    if (Test-Path -LiteralPath $OutFile) {
+        Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
+    }
 
     for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+        Write-Log ("Downloading... Attempt {0}/{1}" -f $attempt, $MaxAttempts) "INFO"
         try {
-            Write-Log "Download attempt $attempt of $MaxAttempts" "INFO"
-            Write-Log "URL: $Url" "INFO"
-            Write-Log "Out: $OutFile" "INFO"
+            Invoke-WebRequest -Uri $Uri -OutFile $OutFile -UseBasicParsing -ErrorAction Stop
 
-            if (Test-Path -LiteralPath $OutFile) {
-                Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
-            }
-
-            # Use Invoke-WebRequest to follow redirects; BITS can be flaky on GitHub for some networks
-            Invoke-WebRequest -Uri $Url -OutFile $OutFile -UseBasicParsing -MaximumRedirection 10 `
-                -Headers @{ "Accept"="application/octet-stream"; "Cache-Control"="no-cache" } -ErrorAction Stop
-
-            if (-not (Test-Path -LiteralPath $OutFile -PathType Leaf)) {
-                throw "File not present after download"
-            }
-
-            $len = (Get-Item -LiteralPath $OutFile).Length
-            Write-Log "Downloaded bytes: $len" "INFO"
-            if ($len -lt 512) { throw "Downloaded file is unexpectedly small ($len bytes). Not a real zip." }
-
-            if (-not (Test-ZipPKSignature -Path $OutFile)) {
-                throw "Downloaded file is not a ZIP (missing PK signature)."
-            }
-            if (-not (Test-ZipOpens -Path $OutFile)) {
-                throw "Downloaded file is not a valid ZIP (ZipArchive cannot open; central directory missing)."
-            }
-
-            Write-Log "Download validated as ZIP" "OK"
-            return
-        }
-        catch {
-            Write-Log "Attempt $attempt failed: $($_.Exception.Message)" "WARN"
-            if (Test-Path -LiteralPath $OutFile) {
-                Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
-            }
-            if ($attempt -lt $MaxAttempts) {
-                $delay = 3 * $attempt
-                Write-Log "Retrying in $delay seconds..." "INFO"
-                Start-Sleep -Seconds $delay
+            if ((Test-Path -LiteralPath $OutFile) -and ((Get-Item -LiteralPath $OutFile).Length -gt 0)) {
+                Write-Log "Download successful." "OK"
+                return $true
             } else {
-                throw "Download failed after $MaxAttempts attempts: $($_.Exception.Message)"
+                throw "Downloaded file is missing or empty."
             }
+        } catch {
+            Write-Log ("Attempt {0}/{1} failed: {2}" -f $attempt, $MaxAttempts, $_.Exception.Message) "WARN"
+
+            if (Test-Path -LiteralPath $OutFile) {
+                Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
+            }
+
+            if ($attempt -eq $MaxAttempts) { return $false }
+
+            Write-Log ("Retrying in {0} seconds..." -f $DelaySeconds) "INFO"
+            Start-Sleep -Seconds $DelaySeconds
         }
     }
+
+    return $false
+}
+
+# --------------------------
+# Proven: Normalize extracted folder structure
+# --------------------------
+function Move-Contents {
+    param([Parameter(Mandatory)][string]$Source, [Parameter(Mandatory)][string]$Target)
+    if (-not (Test-Path -LiteralPath $Source)) { return }
+    Get-ChildItem -LiteralPath $Source -Force | ForEach-Object {
+        try { Move-Item -LiteralPath $_.FullName -Destination $Target -Force } catch {
+            Write-Log ("WARN: Failed to move {0} -> {1}: {2}" -f $_.FullName, $Target, $_.Exception.Message) "WARN"
+        }
+    }
+}
+
+function Normalize-ExtractRoot {
+    param(
+        [Parameter(Mandatory)][string]$ExtractPath,
+        [Parameter(Mandatory)][string]$ZipPath
+    )
+
+    # If contents are nested inside a single top directory, flatten it.
+    $topDirs  = Get-ChildItem -LiteralPath $ExtractPath -Directory -Force -ErrorAction SilentlyContinue
+    $topFiles = Get-ChildItem -LiteralPath $ExtractPath -File -Force -ErrorAction SilentlyContinue |
+                Where-Object { $_.FullName -ne $ZipPath }
+
+    if ($topDirs.Count -eq 1 -and $topFiles.Count -eq 0) {
+        Write-Log ("Normalizing: flattening single folder {0}" -f $topDirs[0].Name) "INFO"
+        Move-Contents -Source $topDirs[0].FullName -Target $ExtractPath
+        try { Remove-Item -LiteralPath $topDirs[0].FullName -Recurse -Force -ErrorAction SilentlyContinue } catch { }
+    }
+}
+
+function Unblock-AllFiles {
+    param([Parameter(Mandatory)][string]$Root)
+    try {
+        Get-ChildItem -LiteralPath $Root -Recurse -Force -File -ErrorAction SilentlyContinue | ForEach-Object {
+            try { Unblock-File -LiteralPath $_.FullName -ErrorAction SilentlyContinue } catch { }
+        }
+    } catch { }
 }
 
 function Get-AllFilesByExtension {
@@ -242,6 +241,9 @@ $summary = [ordered]@{
 Write-Log "Starting. ZipUrl='$ZipUrl' Desktop=$Desktop Taskbar=$Taskbar Silent=$Silent ExportOnly=$ExportOnly" "INFO"
 
 try {
+    # TLS (same as working script)
+    try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch { }
+
     $user = Get-LoggedOnUserSid
     $summary.interactiveUser = $user.UserName
     $summary.userSid = $user.Sid
@@ -255,27 +257,56 @@ try {
     $taskbarDir = Join-Path $appDataPath "Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar"
     $summary.taskbarPinnedFolder = $taskbarDir
 
+    # SYSTEM temp (requested)
     $sysTemp = Join-Path $env:windir "Temp"
     Ensure-Dir $sysTemp
 
-    $zipFile = Join-Path $sysTemp ("Toolbox-Launchers_" + (Get-Date -Format "yyyyMMdd_HHmmss") + "_" + ([guid]::NewGuid().ToString("N").Substring(0,8)) + ".zip")
+    # Unique zip + extract folder
+    $stamp    = (Get-Date -Format "yyyyMMdd_HHmmss")
+    $shortId  = ([guid]::NewGuid().ToString("N").Substring(0,8))
+    $zipPath  = Join-Path $sysTemp ("Toolbox-Launchers_{0}_{1}.zip" -f $stamp, $shortId)
+    $extract  = Join-Path $sysTemp ("CS-Toolbox-Extract_{0}_{1}" -f $stamp, $shortId)
 
-    Download-ZipWithRetry -Url $ZipUrl -OutFile $zipFile -MaxAttempts 3
+    # Download (3 attempts)
+    $ok = Invoke-DownloadWithRetry -Uri $ZipUrl -OutFile $zipPath -MaxAttempts 3 -DelaySeconds 2
+    if (-not $ok) { throw "Download did not succeed after 3 attempts." }
 
-    $summary.downloadedZip  = $zipFile
-    $summary.downloadSha256 = Get-FileHashSafe -Path $zipFile
+    $summary.downloadedZip  = $zipPath
+    $summary.downloadSha256 = Get-FileHashSafe -Path $zipPath
     Write-Log "Downloaded ZIP SHA256: $($summary.downloadSha256)" "OK"
 
-    $extractDir = Join-Path $sysTemp ("CS-Toolbox-Extract_" + (Get-Date -Format "yyyyMMdd_HHmmss") + "_" + ([guid]::NewGuid().ToString("N").Substring(0,8)))
-    Ensure-Dir $extractDir
-    $summary.extractTo = $extractDir
+    # Extract (if extract fails, re-download+extract up to 3 times like bootstrapper logic)
+    $extracted = $false
+    for ($i = 1; $i -le 3; $i++) {
+        try {
+            if (Test-Path -LiteralPath $extract) { Remove-Item -LiteralPath $extract -Recurse -Force -ErrorAction SilentlyContinue }
+            Ensure-Dir $extract
 
-    Write-Log "Extracting to: $extractDir" "INFO"
-    Expand-Archive -LiteralPath $zipFile -DestinationPath $extractDir -Force
+            Write-Log "Extracting... attempt $i/3 -> $extract" "INFO"
+            Expand-Archive -Path $zipPath -DestinationPath $extract -Force
+            $extracted = $true
+            break
+        } catch {
+            Write-Log ("Extract failed attempt $i/3: {0}" -f $_.Exception.Message) "WARN"
+
+            # Try re-download (same pattern you use in the working script)
+            $ok = Invoke-DownloadWithRetry -Uri $ZipUrl -OutFile $zipPath -MaxAttempts 1 -DelaySeconds 2
+            if (-not $ok -and $i -eq 3) { throw "Extract failed after retries: $($_.Exception.Message)" }
+        }
+    }
+
+    if (-not $extracted) { throw "Extract did not complete." }
+
+    $summary.extractTo = $extract
     Write-Log "Extract complete." "OK"
 
-    $lnkFiles = @(Get-AllFilesByExtension -Root $extractDir -Extension ".lnk")
-    $ps1Files = @(Get-AllFilesByExtension -Root $extractDir -Extension ".ps1")
+    Normalize-ExtractRoot -ExtractPath $extract -ZipPath $zipPath
+    Unblock-AllFiles -Root $extract
+
+    # Find ALL files by extension
+    $lnkFiles = @(Get-AllFilesByExtension -Root $extract -Extension ".lnk")
+    $ps1Files = @(Get-AllFilesByExtension -Root $extract -Extension ".ps1")
+
     $summary.lnkCountFound = $lnkFiles.Count
     $summary.ps1CountFound = $ps1Files.Count
 
@@ -296,14 +327,29 @@ try {
     if ($ExportOnly) {
         $summary.result = "EXPORTONLY"
         $summary.finishedAt = (Get-Date).ToString('o')
-        ($summary | ConvertTo-Json -Depth 12) | Set-Content -Path $ExportJson -Encoding UTF8
+        ($summary | ConvertTo-Json -Depth 14) | Set-Content -Path $ExportJson -Encoding UTF8
         if (-not $Silent) { Write-Host "Exported: $ExportJson" }
         exit 0
     }
 
-    if ($ps1Files.Count -gt 0) { $summary.copiedPs1ToCTemp   = Copy-AllFiles -Files $ps1Files -Destination $DeployRoot }
-    if ($Desktop -and $lnkFiles.Count -gt 0) { $summary.copiedLnkToDesktop = Copy-AllFiles -Files $lnkFiles -Destination $desktopPath }
-    if ($Taskbar -and $lnkFiles.Count -gt 0) { $summary.copiedLnkToTaskbar = Copy-AllFiles -Files $lnkFiles -Destination $taskbarDir }
+    # Copy ALL PS1 -> C:\Temp
+    if ($ps1Files.Count -gt 0) {
+        $summary.copiedPs1ToCTemp = Copy-AllFiles -Files $ps1Files -Destination $DeployRoot
+    } else {
+        Write-Log "No .ps1 files to copy." "WARN"
+    }
+
+    # Copy ALL LNK -> Desktop and/or Taskbar
+    if ($lnkFiles.Count -gt 0) {
+        if ($Desktop) {
+            $summary.copiedLnkToDesktop = Copy-AllFiles -Files $lnkFiles -Destination $desktopPath
+        }
+        if ($Taskbar) {
+            $summary.copiedLnkToTaskbar = Copy-AllFiles -Files $lnkFiles -Destination $taskbarDir
+        }
+    } else {
+        Write-Log "No .lnk files to copy." "WARN"
+    }
 
     $summary.result = "SUCCESS"
 }
