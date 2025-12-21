@@ -5,7 +5,7 @@
    irm <RAW_URL> | iex
 
  Default ZipUrl points at your GitHub ZIP:
-   https://github.com/dmooney-cs/dev01/raw/refs/heads/main/Toolbox-Launchers.zip
+   
 
  Downloads ZIP (3 retries), extracts to SYSTEM temp (C:\Windows\Temp), then copies:
    - Launcher .lnk -> interactive user's Desktop and/or Taskbar pinned folder
@@ -27,7 +27,7 @@ param(
     # Defaulted so irm|iex works without passing parameters
     [Parameter(Mandatory=$false)]
     [ValidateNotNullOrEmpty()]
-    [string]$ZipUrl = "https://github.com/dmooney-cs/dev01/raw/refs/heads/main/Toolbox-Launchers.zip",
+    [string]$ZipUrl = "https://github.com/dmooney-cs/dev01/blob/main/prod-01-01.zip",
 
     [switch]$Desktop,
     [switch]$Taskbar,
