@@ -1,18 +1,23 @@
 <# =================================================================================================
- CS-Toolbox-3xDesktopIcon.ps1  (v1.4)
+ CS-Toolbox-3xDesktopIcon.ps1  (v1.6 - Toolbox-Launchers.zip ONLY)
 
- Fixes:
-  - Correct raw URL forms + auto-rewrite blob->raw
-  - Detects Git LFS pointer downloads (common cause of “central directory missing”)
-  - Detects HTML downloads
-  - Strong ZIP validation
-  - Copies ALL by extension:
-      • ALL .lnk -> Desktop and/or Taskbar
-      • ALL .ps1 -> C:\Temp
-    and auto-renames duplicates so nothing is overwritten.
-
- One-liner (CORRECT):
+ One-liner (correct):
    irm https://raw.githubusercontent.com/dmooney-cs/dev01/main/CS-Toolbox-3xDesktopIcon.ps1 | iex
+
+ Downloads (3 attempts) and validates:
+   https://github.com/dmooney-cs/dev01/raw/refs/heads/main/Toolbox-Launchers.zip
+
+ Extracts to: C:\Windows\Temp\<unique>
+ Copies:
+   - ALL .lnk -> interactive user's Desktop and/or Taskbar pinned folder
+   - ALL .ps1 -> C:\Temp
+
+ Switches:
+   -ZipUrl     : override ZIP URL (optional)
+   -Desktop    : copy .lnk to Desktop
+   -Taskbar    : copy .lnk to Taskbar pinned folder
+   -Silent     : no prompts; minimal console output (still logs + exports summary)
+   -ExportOnly : export JSON summary to C:\Temp\collected-info and exit
 ================================================================================================= #>
 
 #requires -version 5.1
@@ -20,14 +25,12 @@
 param(
     [Parameter(Mandatory=$false)]
     [ValidateNotNullOrEmpty()]
-    # Use the payload that is actually a zip. Change to prod-01-01.zip ONLY if it is a real zip.
-    [string]$ZipUrl = "https://raw.githubusercontent.com/dmooney-cs/dev01/main/Toolbox-Launchers.zip",
+    [string]$ZipUrl = "https://github.com/dmooney-cs/dev01/raw/refs/heads/main/Toolbox-Launchers.zip",
 
     [switch]$Desktop,
     [switch]$Taskbar,
     [switch]$Silent,
 
-    # toolbox convention
     [switch]$ExportOnly
 )
 
@@ -37,10 +40,10 @@ $ErrorActionPreference = 'Stop'
 if (-not $Desktop -and -not $Taskbar) { $Desktop = $true }
 
 # ------------------------- Paths -------------------------
-$DeployRoot = "C:\Temp"
+$DeployRoot       = "C:\Temp"
 $CollectedInfoDir = Join-Path $DeployRoot "collected-info"
-$LogFile = Join-Path $DeployRoot "CS-Toolbox-3xDesktopIcon.log"
-$ExportJson = Join-Path $CollectedInfoDir "CS-Toolbox-3xDesktopIcon.json"
+$LogFile          = Join-Path $DeployRoot "CS-Toolbox-3xDesktopIcon.log"
+$ExportJson       = Join-Path $CollectedInfoDir "CS-Toolbox-3xDesktopIcon.json"
 
 function Ensure-Dir {
     param([Parameter(Mandatory)][string]$Path)
@@ -53,8 +56,8 @@ Ensure-Dir $CollectedInfoDir
 
 function Write-Log {
     param(
-        [Parameter(Mandatory)] [string]$Message,
-        [ValidateSet('INFO','WARN','ERROR','OK')] [string]$Level = 'INFO'
+        [Parameter(Mandatory)][string]$Message,
+        [ValidateSet('INFO','WARN','ERROR','OK')][string]$Level = 'INFO'
     )
     $ts = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
     $line = "[$ts][$Level] $Message"
@@ -73,7 +76,8 @@ $script:LogFile = $LogFile
 function Get-LoggedOnUserSid {
     $cs = Get-CimInstance -ClassName Win32_ComputerSystem
     if (-not $cs.UserName) { throw "No interactive user detected (Win32_ComputerSystem.UserName is empty)." }
-    $nt = New-Object System.Security.Principal.NTAccount($cs.UserName)
+
+    $nt  = New-Object System.Security.Principal.NTAccount($cs.UserName)
     $sid = $nt.Translate([System.Security.Principal.SecurityIdentifier]).Value
     [pscustomobject]@{ UserName = $cs.UserName; Sid = $sid }
 }
@@ -81,11 +85,11 @@ function Get-LoggedOnUserSid {
 function Get-UserShellFolderPath {
     param(
         [Parameter(Mandatory)][string]$Sid,
-        [Parameter(Mandatory)][ValidateSet('Desktop','AppData')] [string]$Folder
+        [Parameter(Mandatory)][ValidateSet('Desktop','AppData')][string]$Folder
     )
     $base = "Registry::HKEY_USERS\$Sid\Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders"
     $name = if ($Folder -eq 'Desktop') { 'Desktop' } else { 'AppData' }
-    $val = (Get-ItemProperty -Path $base -Name $name -ErrorAction Stop).$name
+    $val  = (Get-ItemProperty -Path $base -Name $name -ErrorAction Stop).$name
     if (-not $val) { throw "Unable to resolve $Folder path from HKU:\$Sid Shell Folders." }
     $val
 }
@@ -96,75 +100,38 @@ function Get-FileHashSafe {
     (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
 }
 
-function Resolve-GitHubDownloadUrl {
-    param([Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$Url)
-
-    # blob -> raw
-    if ($Url -match '^https://github\.com/([^/]+)/([^/]+)/blob/([^/]+)/(.+)$') {
-        return "https://raw.githubusercontent.com/$($Matches[1])/$($Matches[2])/$($Matches[3])/$($Matches[4])"
-    }
-
-    # raw host mistakenly includes refs/heads
-    if ($Url -match '^https://raw\.githubusercontent\.com/([^/]+)/([^/]+)/refs/heads/([^/]+)/(.+)$') {
-        return "https://raw.githubusercontent.com/$($Matches[1])/$($Matches[2])/$($Matches[3])/$($Matches[4])"
-    }
-
-    return $Url
-}
-
-function Read-FileHeadText {
-    param([Parameter(Mandatory)][string]$Path, [int]$MaxChars = 4096)
-    $bytes = [System.IO.File]::ReadAllBytes($Path)
-    $take = [Math]::Min($bytes.Length, $MaxChars)
-    return [System.Text.Encoding]::UTF8.GetString($bytes, 0, $take)
-}
-
-function Test-DownloadedIsHtml {
+function Test-ZipPKSignature {
     param([Parameter(Mandatory)][string]$Path)
-    $head = Read-FileHeadText -Path $Path -MaxChars 4096
-    return (
-        $head -match '<!DOCTYPE\s+html' -or
-        $head -match '<html' -or
-        ($head -match '<title>' -and $head -match 'GitHub') -or
-        ($head -match 'github\.com' -and $head -match '<body')
-    )
-}
-
-function Test-IsGitLfsPointer {
-    param([Parameter(Mandatory)][string]$Path)
-    $head = Read-FileHeadText -Path $Path -MaxChars 2048
-    # Typical LFS pointer:
-    # version https://git-lfs.github.com/spec/v1
-    # oid sha256:...
-    # size ...
-    return ($head -match 'git-lfs\.github\.com/spec/v1' -and $head -match '^oid sha256:' -and $head -match '^size\s+\d+')
+    $fs = [System.IO.File]::Open($Path,[System.IO.FileMode]::Open,[System.IO.FileAccess]::Read,[System.IO.FileShare]::ReadWrite)
+    try {
+        $buf = New-Object byte[] 2
+        $r = $fs.Read($buf,0,2)
+        if ($r -lt 2) { return $false }
+        return ([System.Text.Encoding]::ASCII.GetString($buf,0,2) -eq 'PK')
+    } finally { $fs.Dispose() }
 }
 
 function Test-ZipOpens {
     param([Parameter(Mandatory)][string]$Path)
     try {
         Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue | Out-Null
-        $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        $fs = [System.IO.File]::Open($Path,[System.IO.FileMode]::Open,[System.IO.FileAccess]::Read,[System.IO.FileShare]::ReadWrite)
         try {
-            $zip = New-Object System.IO.Compression.ZipArchive($fs, [System.IO.Compression.ZipArchiveMode]::Read, $false)
-            try {
-                $null = $zip.Entries.Count
-                return $true
-            } finally { $zip.Dispose() }
+            $zip = New-Object System.IO.Compression.ZipArchive($fs,[System.IO.Compression.ZipArchiveMode]::Read,$false)
+            try { $null = $zip.Entries.Count; return $true }
+            finally { $zip.Dispose() }
         } finally { $fs.Dispose() }
     } catch { return $false }
 }
 
-function Download-FileValidatedWithRetry {
+function Download-ZipWithRetry {
     param(
-        [Parameter(Mandatory)][ValidateNotNullOrEmpty()]
-        [string]$Url,
-
+        [Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$Url,
         [Parameter(Mandatory)][string]$OutFile,
-
         [int]$MaxAttempts = 3
     )
 
+    # TLS hardening (PS 5.1)
     try {
         [Net.ServicePointManager]::SecurityProtocol =
             [Net.SecurityProtocolType]::Tls12 -bor
@@ -182,19 +149,9 @@ function Download-FileValidatedWithRetry {
                 Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
             }
 
-            $usedBits = $false
-            try {
-                if (Get-Command Start-BitsTransfer -ErrorAction SilentlyContinue) {
-                    Start-BitsTransfer -Source $Url -Destination $OutFile -ErrorAction Stop
-                    $usedBits = $true
-                }
-            } catch {
-                Write-Log "BITS failed: $($_.Exception.Message)" "WARN"
-            }
-
-            if (-not $usedBits) {
-                Invoke-WebRequest -Uri $Url -OutFile $OutFile -UseBasicParsing -Headers @{ "Accept"="application/octet-stream" } -ErrorAction Stop
-            }
+            # Use Invoke-WebRequest to follow redirects; BITS can be flaky on GitHub for some networks
+            Invoke-WebRequest -Uri $Url -OutFile $OutFile -UseBasicParsing -MaximumRedirection 10 `
+                -Headers @{ "Accept"="application/octet-stream"; "Cache-Control"="no-cache" } -ErrorAction Stop
 
             if (-not (Test-Path -LiteralPath $OutFile -PathType Leaf)) {
                 throw "File not present after download"
@@ -202,24 +159,16 @@ function Download-FileValidatedWithRetry {
 
             $len = (Get-Item -LiteralPath $OutFile).Length
             Write-Log "Downloaded bytes: $len" "INFO"
+            if ($len -lt 512) { throw "Downloaded file is unexpectedly small ($len bytes). Not a real zip." }
 
-            if (Test-DownloadedIsHtml -Path $OutFile) {
-                throw "Downloaded content is HTML (wrong URL or intercepted)."
+            if (-not (Test-ZipPKSignature -Path $OutFile)) {
+                throw "Downloaded file is not a ZIP (missing PK signature)."
             }
-
-            if (Test-IsGitLfsPointer -Path $OutFile) {
-                throw "Downloaded content is a Git LFS pointer (not the real ZIP). This file is likely stored with Git LFS, and raw.githubusercontent.com is returning the pointer text instead of the binary."
-            }
-
             if (-not (Test-ZipOpens -Path $OutFile)) {
-                # Extra hint: show first 12 bytes in hex to help identify what it is
-                $b = [System.IO.File]::ReadAllBytes($OutFile)
-                $take = [Math]::Min($b.Length, 12)
-                $hex = ($b[0..($take-1)] | ForEach-Object { $_.ToString("X2") }) -join ' '
-                throw "Downloaded file is not a valid ZIP (ZipArchive cannot open; central directory missing). First bytes: $hex"
+                throw "Downloaded file is not a valid ZIP (ZipArchive cannot open; central directory missing)."
             }
 
-            Write-Log "Download validated as a real ZIP on attempt $attempt" "OK"
+            Write-Log "Download validated as ZIP" "OK"
             return
         }
         catch {
@@ -239,10 +188,7 @@ function Download-FileValidatedWithRetry {
 }
 
 function Get-AllFilesByExtension {
-    param(
-        [Parameter(Mandatory)][string]$Root,
-        [Parameter(Mandatory)][string]$Extension
-    )
+    param([Parameter(Mandatory)][string]$Root,[Parameter(Mandatory)][string]$Extension)
     Get-ChildItem -LiteralPath $Root -Recurse -File -ErrorAction Stop |
         Where-Object { $_.Extension -ieq $Extension }
 }
@@ -256,13 +202,13 @@ function Copy-AllFiles {
 
     $copied = @()
     foreach ($f in $Files) {
-        $baseName = [System.IO.Path]::GetFileNameWithoutExtension($f.Name)
-        $ext = $f.Extension
-        $dest = Join-Path $Destination ($baseName + $ext)
+        $base = [System.IO.Path]::GetFileNameWithoutExtension($f.Name)
+        $ext  = $f.Extension
 
+        $dest = Join-Path $Destination ($base + $ext)
         $i = 2
         while (Test-Path -LiteralPath $dest) {
-            $dest = Join-Path $Destination ("{0}_({1}){2}" -f $baseName, $i, $ext)
+            $dest = Join-Path $Destination ("{0}_({1}){2}" -f $base, $i, $ext)
             $i++
         }
 
@@ -276,8 +222,7 @@ function Copy-AllFiles {
 # ------------------------- Summary -------------------------
 $summary = [ordered]@{
     startedAt           = (Get-Date).ToString('o')
-    zipUrlInput         = $ZipUrl
-    zipUrlResolved      = $null
+    zipUrl              = $ZipUrl
     downloadedZip       = $null
     downloadSha256      = $null
     extractTo           = $null
@@ -294,17 +239,13 @@ $summary = [ordered]@{
     result              = "UNKNOWN"
 }
 
-Write-Log "Starting. ZipUrlInput='$ZipUrl' Desktop=$Desktop Taskbar=$Taskbar Silent=$Silent ExportOnly=$ExportOnly" "INFO"
+Write-Log "Starting. ZipUrl='$ZipUrl' Desktop=$Desktop Taskbar=$Taskbar Silent=$Silent ExportOnly=$ExportOnly" "INFO"
 
 try {
-    $zipResolved = Resolve-GitHubDownloadUrl -Url $ZipUrl
-    $summary.zipUrlResolved = $zipResolved
-    if ($zipResolved -ne $ZipUrl) { Write-Log "Resolved URL -> $zipResolved" "OK" }
-
     $user = Get-LoggedOnUserSid
     $summary.interactiveUser = $user.UserName
     $summary.userSid = $user.Sid
-    Write-Log "Interactive user: $($user.UserName)  SID=$($user.Sid)" "INFO"
+    Write-Log "Interactive user: $($user.UserName) SID=$($user.Sid)" "INFO"
 
     $desktopPath = Get-UserShellFolderPath -Sid $user.Sid -Folder Desktop
     $appDataPath = Get-UserShellFolderPath -Sid $user.Sid -Folder AppData
@@ -317,9 +258,9 @@ try {
     $sysTemp = Join-Path $env:windir "Temp"
     Ensure-Dir $sysTemp
 
-    $zipFile = Join-Path $sysTemp ("ToolboxPayload_" + (Get-Date -Format "yyyyMMdd_HHmmss") + "_" + ([guid]::NewGuid().ToString("N").Substring(0,8)) + ".zip")
+    $zipFile = Join-Path $sysTemp ("Toolbox-Launchers_" + (Get-Date -Format "yyyyMMdd_HHmmss") + "_" + ([guid]::NewGuid().ToString("N").Substring(0,8)) + ".zip")
 
-    Download-FileValidatedWithRetry -Url $zipResolved -OutFile $zipFile -MaxAttempts 3
+    Download-ZipWithRetry -Url $ZipUrl -OutFile $zipFile -MaxAttempts 3
 
     $summary.downloadedZip  = $zipFile
     $summary.downloadSha256 = Get-FileHashSafe -Path $zipFile
@@ -335,7 +276,6 @@ try {
 
     $lnkFiles = @(Get-AllFilesByExtension -Root $extractDir -Extension ".lnk")
     $ps1Files = @(Get-AllFilesByExtension -Root $extractDir -Extension ".ps1")
-
     $summary.lnkCountFound = $lnkFiles.Count
     $summary.ps1CountFound = $ps1Files.Count
 
@@ -361,7 +301,7 @@ try {
         exit 0
     }
 
-    if ($ps1Files.Count -gt 0) { $summary.copiedPs1ToCTemp = Copy-AllFiles -Files $ps1Files -Destination $DeployRoot }
+    if ($ps1Files.Count -gt 0) { $summary.copiedPs1ToCTemp   = Copy-AllFiles -Files $ps1Files -Destination $DeployRoot }
     if ($Desktop -and $lnkFiles.Count -gt 0) { $summary.copiedLnkToDesktop = Copy-AllFiles -Files $lnkFiles -Destination $desktopPath }
     if ($Taskbar -and $lnkFiles.Count -gt 0) { $summary.copiedLnkToTaskbar = Copy-AllFiles -Files $lnkFiles -Destination $taskbarDir }
 
