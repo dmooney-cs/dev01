@@ -25,7 +25,7 @@
 param(
     [Parameter(Mandatory=$false)]
     [ValidateNotNullOrEmpty()]
-    [string]$ZipUrl = "https://github.com/dmooney-cs/dev01/blob/main/Toolbox-Launchers.zip",
+    [string]$ZipUrl = "https://github.com/dmooney-cs/dev01/raw/refs/heads/main/CS-Toolbox-3xDesktopIcon.ps1",
 
     [switch]$Desktop,
     [switch]$Taskbar,
