@@ -1,46 +1,32 @@
 <# =================================================================================================
- CS-Toolbox-3xDesktopIcon.ps1  (fixed)
+ CS-Toolbox-3xDesktopIcon.ps1  (v1.1)
 
  One-liner friendly:
-   irm <RAW_URL> | iex
+   irm https://raw.githubusercontent.com/dmooney-cs/dev01/main/CS-Toolbox-3xDesktopIcon.ps1 | iex
 
- Default ZipUrl points at your GitHub ZIP:
-   
-
- Downloads ZIP (3 retries), extracts to SYSTEM temp (C:\Windows\Temp), then copies:
-   - Launcher .lnk -> interactive user's Desktop and/or Taskbar pinned folder
-   - CS-Toolbox-Launcher-DevTools-ZeroTouch.ps1 -> C:\Temp
-
- Switches:
-   -ZipUrl     : override ZIP URL
-   -Desktop    : copy to Desktop
-   -Taskbar    : copy to Taskbar pinned folder
-   -Silent     : no prompts; minimal console output (still logs + exports summary)
-   -ExportOnly : export JSON summary to C:\Temp\collected-info and exit
-
- Toolbox convention: supports -ExportOnly.
+ Default ZipUrl:
+   (Set to your WORKING binary URL form; script also auto-fixes blob URLs)
 ================================================================================================= #>
 
 #requires -version 5.1
 [CmdletBinding()]
 param(
-    # Defaulted so irm|iex works without passing parameters
     [Parameter(Mandatory=$false)]
     [ValidateNotNullOrEmpty()]
-    [string]$ZipUrl = "https://github.com/dmooney-cs/dev01/blob/main/prod-01-01.zip",
+    # IMPORTANT: default should NOT be /blob/
+    [string]$ZipUrl = "https://github.com/dmooney-cs/dev01/raw/refs/heads/main/prod-01-01.zip",
 
     [switch]$Desktop,
     [switch]$Taskbar,
     [switch]$Silent,
 
-    # required convention
+    # toolbox convention
     [switch]$ExportOnly
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# Defaults
 if (-not $Desktop -and -not $Taskbar) { $Desktop = $true }
 
 # Paths
@@ -55,7 +41,6 @@ function Ensure-Dir {
         New-Item -ItemType Directory -Path $Path -Force | Out-Null
     }
 }
-
 Ensure-Dir $DeployRoot
 Ensure-Dir $CollectedInfoDir
 
@@ -81,7 +66,6 @@ $script:LogFile = $LogFile
 function Get-LoggedOnUserSid {
     $cs = Get-CimInstance -ClassName Win32_ComputerSystem
     if (-not $cs.UserName) { throw "No interactive user detected (Win32_ComputerSystem.UserName is empty)." }
-
     $nt = New-Object System.Security.Principal.NTAccount($cs.UserName)
     $sid = $nt.Translate([System.Security.Principal.SecurityIdentifier]).Value
     [pscustomobject]@{ UserName = $cs.UserName; Sid = $sid }
@@ -119,6 +103,60 @@ function Get-FileHashSafe {
     (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
 }
 
+function Resolve-GitHubDownloadUrl {
+    param([Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$Url)
+
+    # If user gave a blob URL, convert to raw
+    # https://github.com/ORG/REPO/blob/BRANCH/path/file.zip
+    # => https://raw.githubusercontent.com/ORG/REPO/BRANCH/path/file.zip
+    if ($Url -match '^https://github\.com/([^/]+)/([^/]+)/blob/([^/]+)/(.+)$') {
+        $org = $Matches[1]; $repo = $Matches[2]; $branch = $Matches[3]; $path = $Matches[4]
+        return "https://raw.githubusercontent.com/$org/$repo/$branch/$path"
+    }
+
+    # If they used raw host but incorrectly included /refs/heads/ in raw host URL, fix it:
+    # https://raw.githubusercontent.com/org/repo/refs/heads/main/file
+    # => https://raw.githubusercontent.com/org/repo/main/file
+    if ($Url -match '^https://raw\.githubusercontent\.com/([^/]+)/([^/]+)/refs/heads/([^/]+)/(.+)$') {
+        return "https://raw.githubusercontent.com/$($Matches[1])/$($Matches[2])/$($Matches[3])/$($Matches[4])"
+    }
+
+    return $Url
+}
+
+function Test-ZipLooksValid {
+    param([Parameter(Mandatory)][string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+
+    # Quick signature check: ZIP usually starts with 'PK'
+    $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+    try {
+        $buf = New-Object byte[] 8
+        $read = $fs.Read($buf, 0, $buf.Length)
+        if ($read -lt 2) { return $false }
+        $sig = [System.Text.Encoding]::ASCII.GetString($buf, 0, 2)
+        if ($sig -ne 'PK') { return $false }
+        return $true
+    } finally {
+        $fs.Dispose()
+    }
+}
+
+function Test-DownloadedIsHtml {
+    param([Parameter(Mandatory)][string]$Path)
+
+    # Read a small chunk and look for HTML markers
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    $len = [Math]::Min($bytes.Length, 4096)
+    $head = [System.Text.Encoding]::UTF8.GetString($bytes, 0, $len)
+
+    if ($head -match '<!DOCTYPE\s+html' -or $head -match '<html' -or $head -match 'github\.com' -and $head -match '<title>') {
+        return $true
+    }
+    return $false
+}
+
 function Download-GitHubZipWithRetry {
     param(
         [Parameter(Mandatory)][ValidateNotNullOrEmpty()]
@@ -130,7 +168,7 @@ function Download-GitHubZipWithRetry {
         [int]$MaxAttempts = 3
     )
 
-    # TLS hardening for PS 5.1
+    # TLS hardening
     try {
         [Net.ServicePointManager]::SecurityProtocol =
             [Net.SecurityProtocolType]::Tls12 -bor
@@ -166,7 +204,15 @@ function Download-GitHubZipWithRetry {
                 throw "File not present after download"
             }
 
-            Write-Log "Download successful on attempt $attempt" "OK"
+            # Validate: must not be HTML, must look like zip
+            if (Test-DownloadedIsHtml -Path $OutFile) {
+                throw "Downloaded content appears to be HTML (likely a GitHub 'blob' page). Use a raw download URL."
+            }
+            if (-not (Test-ZipLooksValid -Path $OutFile)) {
+                throw "Downloaded file does not look like a ZIP (missing 'PK' signature)."
+            }
+
+            Write-Log "Download successful and validated as ZIP on attempt $attempt" "OK"
             return
         }
         catch {
@@ -176,7 +222,7 @@ function Download-GitHubZipWithRetry {
                 Write-Log "Retrying in $delay seconds..." "INFO"
                 Start-Sleep -Seconds $delay
             } else {
-                throw "Download failed after $MaxAttempts attempts"
+                throw "Download failed after $MaxAttempts attempts: $($_.Exception.Message)"
             }
         }
     }
@@ -185,7 +231,8 @@ function Download-GitHubZipWithRetry {
 # --------- Summary ---------
 $summary = [ordered]@{
     startedAt           = (Get-Date).ToString('o')
-    zipUrl              = $ZipUrl
+    zipUrlInput         = $ZipUrl
+    zipUrlResolved      = $null
     downloadedZip       = $null
     downloadSha256      = $null
     extractTo           = $null
@@ -209,9 +256,15 @@ $summary = [ordered]@{
     result              = "UNKNOWN"
 }
 
-Write-Log "Starting. ZipUrl='$ZipUrl' Desktop=$Desktop Taskbar=$Taskbar Silent=$Silent ExportOnly=$ExportOnly" "INFO"
+Write-Log "Starting. ZipUrlInput='$ZipUrl' Desktop=$Desktop Taskbar=$Taskbar Silent=$Silent ExportOnly=$ExportOnly" "INFO"
 
 try {
+    $zipResolved = Resolve-GitHubDownloadUrl -Url $ZipUrl
+    $summary.zipUrlResolved = $zipResolved
+    if ($zipResolved -ne $ZipUrl) {
+        Write-Log "Resolved GitHub URL -> $zipResolved" "OK"
+    }
+
     $user = Get-LoggedOnUserSid
     $summary.interactiveUser = $user.UserName
     $summary.userSid = $user.Sid
@@ -225,19 +278,17 @@ try {
     $taskbarDir = Join-Path $appDataPath "Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar"
     $summary.taskbarPinnedFolder = $taskbarDir
 
-    # Download into SYSTEM temp
     $sysTemp = Join-Path $env:windir "Temp"
     Ensure-Dir $sysTemp
 
-    $zipFile = Join-Path $sysTemp ("Toolbox-Launchers_" + (Get-Date -Format "yyyyMMdd_HHmmss") + "_" + ([guid]::NewGuid().ToString("N").Substring(0,8)) + ".zip")
+    $zipFile = Join-Path $sysTemp ("ToolboxPayload_" + (Get-Date -Format "yyyyMMdd_HHmmss") + "_" + ([guid]::NewGuid().ToString("N").Substring(0,8)) + ".zip")
 
-    Download-GitHubZipWithRetry -Url $ZipUrl -OutFile $zipFile -MaxAttempts 3
+    Download-GitHubZipWithRetry -Url $zipResolved -OutFile $zipFile -MaxAttempts 3
 
     $summary.downloadedZip = $zipFile
     $summary.downloadSha256 = Get-FileHashSafe -Path $zipFile
     Write-Log "Downloaded ZIP SHA256: $($summary.downloadSha256)" "OK"
 
-    # Extract
     $extractDir = Join-Path $sysTemp ("CS-Toolbox-Extract_" + (Get-Date -Format "yyyyMMdd_HHmmss") + "_" + ([guid]::NewGuid().ToString("N").Substring(0,8)))
     Ensure-Dir $extractDir
     $summary.extractTo = $extractDir
@@ -246,7 +297,6 @@ try {
     Expand-Archive -LiteralPath $zipFile -DestinationPath $extractDir -Force
     Write-Log "Extract complete." "OK"
 
-    # Locate payload files
     $lnk = Find-FirstMatch -Root $extractDir -Patterns @(
         "*ConnectSeure*Toolbox*Launcher*.lnk",
         "*ConnectSecure*Toolbox*Launcher*.lnk",
@@ -297,14 +347,12 @@ try {
         exit 0
     }
 
-    # Copy PS1 to C:\Temp
     $ps1Dest = Join-Path $DeployRoot (Split-Path -Leaf $ps1)
     Copy-Item -LiteralPath $ps1 -Destination $ps1Dest -Force
     $summary.copiedToCTemp = $ps1Dest
     $summary.hashes.ps1CTempSha256 = Get-FileHashSafe -Path $ps1Dest
     Write-Log "Copied PS1 to: $ps1Dest" "OK"
 
-    # Copy LNK to Desktop
     if ($Desktop) {
         Ensure-Dir $desktopPath
         $lnkDest = Join-Path $desktopPath (Split-Path -Leaf $lnk)
@@ -314,7 +362,6 @@ try {
         Write-Log "Copied LNK to Desktop: $lnkDest" "OK"
     }
 
-    # Copy LNK to Taskbar pinned folder
     if ($Taskbar) {
         Ensure-Dir $taskbarDir
         $tbDest = Join-Path $taskbarDir (Split-Path -Leaf $lnk)
@@ -334,7 +381,7 @@ catch {
 }
 finally {
     $summary.finishedAt = (Get-Date).ToString('o')
-    ($summary | ConvertTo-Json -Depth 10) | Set-Content -Path $ExportJson -Encoding UTF8
+    ($summary | ConvertTo-Json -Depth 12) | Set-Content -Path $ExportJson -Encoding UTF8
     Write-Log "Summary exported to: $ExportJson" "INFO"
     Write-Log "Done. Result=$($summary.result)" "INFO"
 }
