@@ -1,54 +1,53 @@
 <# =================================================================================================
- CS-Toolbox-3xDesktopIcon.ps1  (v1.0)
+ CS-Toolbox-3xDesktopIcon.ps1  (fixed)
 
- Downloads a ZIP from GitHub (with up to 3 attempts), extracts to SYSTEM temp (C:\Windows\Temp),
- then copies the correct items:
+ One-liner friendly:
+   irm <RAW_URL> | iex
+
+ Default ZipUrl points at your GitHub ZIP:
+   https://github.com/dmooney-cs/dev01/raw/refs/heads/main/Toolbox-Launchers.zip
+
+ Downloads ZIP (3 retries), extracts to SYSTEM temp (C:\Windows\Temp), then copies:
    - Launcher .lnk -> interactive user's Desktop and/or Taskbar pinned folder
    - CS-Toolbox-Launcher-DevTools-ZeroTouch.ps1 -> C:\Temp
 
- Default behavior:
-   - If neither -Desktop nor -Taskbar is specified, Desktop is assumed.
-   - Runs verbose by default (shows actions + hashes + prompts).
-   - -Silent makes it deployment-friendly (no prompts, minimal console output; still logs + exports summary).
-
  Switches:
-   -ZipUrl     : Direct GitHub zip URL (required)
-   -Desktop    : Copy LNK to user's Desktop
-   -Taskbar    : Copy LNK to user's Taskbar pinned folder
-   -Silent     : No prompts; minimal output; still logs
-   -ExportOnly : Export JSON summary to C:\Temp\collected-info and exit (toolbox convention)
+   -ZipUrl     : override ZIP URL
+   -Desktop    : copy to Desktop
+   -Taskbar    : copy to Taskbar pinned folder
+   -Silent     : no prompts; minimal console output (still logs + exports summary)
+   -ExportOnly : export JSON summary to C:\Temp\collected-info and exit
 
- Your GitHub ZIP URL example:
-   https://github.com/dmooney-cs/dev01/raw/refs/heads/main/Toolbox-Launchers.zip
-
+ Toolbox convention: supports -ExportOnly.
 ================================================================================================= #>
 
 #requires -version 5.1
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory=$true)]
-    [string]$ZipUrl,
+    # Defaulted so irm|iex works without passing parameters
+    [Parameter(Mandatory=$false)]
+    [ValidateNotNullOrEmpty()]
+    [string]$ZipUrl = "https://github.com/dmooney-cs/dev01/raw/refs/heads/main/Toolbox-Launchers.zip",
 
     [switch]$Desktop,
     [switch]$Taskbar,
-
     [switch]$Silent,
 
-    # Required by your toolbox conventions
+    # required convention
     [switch]$ExportOnly
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# ------------------------- Defaults -------------------------
+# Defaults
 if (-not $Desktop -and -not $Taskbar) { $Desktop = $true }
 
-# ------------------------- Paths / logging -------------------------
+# Paths
 $DeployRoot = "C:\Temp"
 $CollectedInfoDir = Join-Path $DeployRoot "collected-info"
-$LogFile = Join-Path $DeployRoot "CS-Toolbox-GitHubZip-Deploy.log"
-$ExportJson = Join-Path $CollectedInfoDir "CS-Toolbox-GitHubZip-Deploy.json"
+$LogFile = Join-Path $DeployRoot "CS-Toolbox-3xDesktopIcon.log"
+$ExportJson = Join-Path $CollectedInfoDir "CS-Toolbox-3xDesktopIcon.json"
 
 function Ensure-Dir {
     param([Parameter(Mandatory)][string]$Path)
@@ -77,18 +76,15 @@ function Write-Log {
         }
     }
 }
-
 $script:LogFile = $LogFile
-Write-Log "Starting. ZipUrl='$ZipUrl' Desktop=$Desktop Taskbar=$Taskbar Silent=$Silent ExportOnly=$ExportOnly" "INFO"
 
-# ------------------------- Helpers -------------------------
 function Get-LoggedOnUserSid {
     $cs = Get-CimInstance -ClassName Win32_ComputerSystem
     if (-not $cs.UserName) { throw "No interactive user detected (Win32_ComputerSystem.UserName is empty)." }
 
     $nt = New-Object System.Security.Principal.NTAccount($cs.UserName)
     $sid = $nt.Translate([System.Security.Principal.SecurityIdentifier]).Value
-    return [pscustomobject]@{ UserName = $cs.UserName; Sid = $sid }
+    [pscustomobject]@{ UserName = $cs.UserName; Sid = $sid }
 }
 
 function Get-UserShellFolderPath {
@@ -100,7 +96,7 @@ function Get-UserShellFolderPath {
     $name = if ($Folder -eq 'Desktop') { 'Desktop' } else { 'AppData' }
     $val = (Get-ItemProperty -Path $base -Name $name -ErrorAction Stop).$name
     if (-not $val) { throw "Unable to resolve $Folder path from HKU:\$Sid Shell Folders." }
-    return $val
+    $val
 }
 
 function Find-FirstMatch {
@@ -114,18 +110,18 @@ function Find-FirstMatch {
                Select-Object -First 1
         if ($hit) { return $hit.FullName }
     }
-    return $null
+    $null
 }
 
 function Get-FileHashSafe {
     param([Parameter(Mandatory)][string]$Path)
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
-    return (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
+    (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
 }
 
 function Download-GitHubZipWithRetry {
     param(
-        [Parameter(Mandatory)]
+        [Parameter(Mandatory)][ValidateNotNullOrEmpty()]
         [string]$Url,
 
         [Parameter(Mandatory)]
@@ -175,7 +171,6 @@ function Download-GitHubZipWithRetry {
         }
         catch {
             Write-Log "Attempt $attempt failed: $($_.Exception.Message)" "WARN"
-
             if ($attempt -lt $MaxAttempts) {
                 $delay = 3 * $attempt
                 Write-Log "Retrying in $delay seconds..." "INFO"
@@ -187,7 +182,7 @@ function Download-GitHubZipWithRetry {
     }
 }
 
-# ------------------------- Summary object (ExportOnly/collected-info) -------------------------
+# --------- Summary ---------
 $summary = [ordered]@{
     startedAt           = (Get-Date).ToString('o')
     zipUrl              = $ZipUrl
@@ -214,8 +209,9 @@ $summary = [ordered]@{
     result              = "UNKNOWN"
 }
 
+Write-Log "Starting. ZipUrl='$ZipUrl' Desktop=$Desktop Taskbar=$Taskbar Silent=$Silent ExportOnly=$ExportOnly" "INFO"
+
 try {
-    # Determine interactive user + target folders
     $user = Get-LoggedOnUserSid
     $summary.interactiveUser = $user.UserName
     $summary.userSid = $user.Sid
@@ -229,7 +225,7 @@ try {
     $taskbarDir = Join-Path $appDataPath "Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar"
     $summary.taskbarPinnedFolder = $taskbarDir
 
-    # Download ZIP into SYSTEM temp
+    # Download into SYSTEM temp
     $sysTemp = Join-Path $env:windir "Temp"
     Ensure-Dir $sysTemp
 
@@ -241,7 +237,7 @@ try {
     $summary.downloadSha256 = Get-FileHashSafe -Path $zipFile
     Write-Log "Downloaded ZIP SHA256: $($summary.downloadSha256)" "OK"
 
-    # Extract into SYSTEM temp unique folder
+    # Extract
     $extractDir = Join-Path $sysTemp ("CS-Toolbox-Extract_" + (Get-Date -Format "yyyyMMdd_HHmmss") + "_" + ([guid]::NewGuid().ToString("N").Substring(0,8)))
     Ensure-Dir $extractDir
     $summary.extractTo = $extractDir
@@ -250,7 +246,7 @@ try {
     Expand-Archive -LiteralPath $zipFile -DestinationPath $extractDir -Force
     Write-Log "Extract complete." "OK"
 
-    # Find the correct files in extracted tree
+    # Locate payload files
     $lnk = Find-FirstMatch -Root $extractDir -Patterns @(
         "*ConnectSeure*Toolbox*Launcher*.lnk",
         "*ConnectSecure*Toolbox*Launcher*.lnk",
@@ -258,7 +254,6 @@ try {
         "*Toolbox*Launcher*.lnk",
         "*.lnk"
     )
-
     $ps1 = Find-FirstMatch -Root $extractDir -Patterns @(
         "*CS-Toolbox-Launcher-DevTools-ZeroTouch.ps1",
         "*ZeroTouch*.ps1"
@@ -303,7 +298,6 @@ try {
     }
 
     # Copy PS1 to C:\Temp
-    Ensure-Dir $DeployRoot
     $ps1Dest = Join-Path $DeployRoot (Split-Path -Leaf $ps1)
     Copy-Item -LiteralPath $ps1 -Destination $ps1Dest -Force
     $summary.copiedToCTemp = $ps1Dest
