@@ -1,5 +1,5 @@
 <# =================================================================================================
- CS-Toolbox-3xDesktopIcon.ps1  (v1.2 - robust ZIP validation)
+ CS-Toolbox-3xDesktopIcon.ps1  (v1.3 - copy ALL by extension)
 
  One-liner friendly:
    irm https://raw.githubusercontent.com/dmooney-cs/dev01/main/CS-Toolbox-3xDesktopIcon.ps1 | iex
@@ -7,13 +7,13 @@
  - Downloads ZIP (3 attempts) with strong validation (rejects HTML, verifies ZIP structure)
  - Extracts to SYSTEM temp (C:\Windows\Temp)
  - Copies:
-     • Launcher .lnk -> interactive user's Desktop and/or Taskbar pinned folder
-     • CS-Toolbox-Launcher-DevTools-ZeroTouch.ps1 -> C:\Temp
+     • ALL .lnk files -> interactive user's Desktop and/or Taskbar pinned folder
+     • ALL .ps1 files -> C:\Temp
 
  Switches:
    -ZipUrl     : override ZIP URL
-   -Desktop    : copy LNK to Desktop
-   -Taskbar    : copy LNK to Taskbar pinned folder
+   -Desktop    : copy .lnk files to Desktop
+   -Taskbar    : copy .lnk files to Taskbar pinned folder
    -Silent     : no prompts; minimal console output (still logs + exports summary)
    -ExportOnly : export JSON summary to C:\Temp\collected-info and exit
 ================================================================================================= #>
@@ -23,7 +23,6 @@
 param(
     [Parameter(Mandatory=$false)]
     [ValidateNotNullOrEmpty()]
-    # Default should be a REAL download URL (NOT /blob/)
     [string]$ZipUrl = "https://github.com/dmooney-cs/dev01/raw/refs/heads/main/Toolbox-Launchers.zip",
 
     [switch]$Desktop,
@@ -93,20 +92,6 @@ function Get-UserShellFolderPath {
     $val
 }
 
-function Find-FirstMatch {
-    param(
-        [Parameter(Mandatory)][string]$Root,
-        [Parameter(Mandatory)][string[]]$Patterns
-    )
-    foreach ($p in $Patterns) {
-        $hit = Get-ChildItem -LiteralPath $Root -Recurse -File -ErrorAction SilentlyContinue |
-               Where-Object { $_.Name -like $p } |
-               Select-Object -First 1
-        if ($hit) { return $hit.FullName }
-    }
-    $null
-}
-
 function Get-FileHashSafe {
     param([Parameter(Mandatory)][string]$Path)
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
@@ -116,16 +101,12 @@ function Get-FileHashSafe {
 function Resolve-GitHubDownloadUrl {
     param([Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$Url)
 
-    # Convert blob -> raw.githubusercontent.com
     if ($Url -match '^https://github\.com/([^/]+)/([^/]+)/blob/([^/]+)/(.+)$') {
         return "https://raw.githubusercontent.com/$($Matches[1])/$($Matches[2])/$($Matches[3])/$($Matches[4])"
     }
-
-    # Fix raw host misuse: /refs/heads/ in raw host URLs
     if ($Url -match '^https://raw\.githubusercontent\.com/([^/]+)/([^/]+)/refs/heads/([^/]+)/(.+)$') {
         return "https://raw.githubusercontent.com/$($Matches[1])/$($Matches[2])/$($Matches[3])/$($Matches[4])"
     }
-
     return $Url
 }
 
@@ -142,7 +123,7 @@ function Test-DownloadedIsHtml {
         $head -match '<!DOCTYPE\s+html' -or
         $head -match '<html' -or
         ($head -match '<title>' -and $head -match 'GitHub') -or
-        $head -match 'github\.com' -and $head -match '<body'
+        ($head -match 'github\.com' -and $head -match '<body')
     )
 }
 
@@ -154,18 +135,11 @@ function Test-ZipOpens {
         try {
             $zip = New-Object System.IO.Compression.ZipArchive($fs, [System.IO.Compression.ZipArchiveMode]::Read, $false)
             try {
-                # Touch entries to force central directory parsing
                 $null = $zip.Entries.Count
                 return $true
-            } finally {
-                $zip.Dispose()
-            }
-        } finally {
-            $fs.Dispose()
-        }
-    } catch {
-        return $false
-    }
+            } finally { $zip.Dispose() }
+        } finally { $fs.Dispose() }
+    } catch { return $false }
 }
 
 function Download-FileValidatedWithRetry {
@@ -178,7 +152,6 @@ function Download-FileValidatedWithRetry {
         [int]$MaxAttempts = 3
     )
 
-    # TLS hardening (PS 5.1)
     try {
         [Net.ServicePointManager]::SecurityProtocol =
             [Net.SecurityProtocolType]::Tls12 -bor
@@ -196,7 +169,6 @@ function Download-FileValidatedWithRetry {
                 Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
             }
 
-            # Prefer BITS; fallback to IWR
             $usedBits = $false
             try {
                 if (Get-Command Start-BitsTransfer -ErrorAction SilentlyContinue) {
@@ -208,7 +180,6 @@ function Download-FileValidatedWithRetry {
             }
 
             if (-not $usedBits) {
-                # Encourage binary transfer + reduce odd content-type issues
                 Invoke-WebRequest -Uri $Url -OutFile $OutFile -UseBasicParsing -Headers @{ "Accept"="application/octet-stream" } -ErrorAction Stop
             }
 
@@ -216,12 +187,9 @@ function Download-FileValidatedWithRetry {
                 throw "File not present after download"
             }
 
-            # Reject HTML downloads early
             if (Test-DownloadedIsHtml -Path $OutFile) {
-                throw "Downloaded content appears to be HTML (not a ZIP). This usually happens with GitHub blob/redirect pages."
+                throw "Downloaded content appears to be HTML (not a ZIP)."
             }
-
-            # Validate ZIP by actually opening it (catches your exact central-directory error)
             if (-not (Test-ZipOpens -Path $OutFile)) {
                 throw "Downloaded file is not a valid ZIP (cannot open ZipArchive / central directory missing)."
             }
@@ -231,12 +199,9 @@ function Download-FileValidatedWithRetry {
         }
         catch {
             Write-Log "Attempt $attempt failed: $($_.Exception.Message)" "WARN"
-
-            # Clean up bad file before retry
             if (Test-Path -LiteralPath $OutFile) {
                 Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
             }
-
             if ($attempt -lt $MaxAttempts) {
                 $delay = 3 * $attempt
                 Write-Log "Retrying in $delay seconds..." "INFO"
@@ -246,6 +211,32 @@ function Download-FileValidatedWithRetry {
             }
         }
     }
+}
+
+function Get-AllFilesByExtension {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string]$Extension  # like ".lnk" or ".ps1"
+    )
+    Get-ChildItem -LiteralPath $Root -Recurse -File -ErrorAction Stop |
+        Where-Object { $_.Extension -ieq $Extension }
+}
+
+function Copy-AllFiles {
+    param(
+        [Parameter(Mandatory)][System.IO.FileInfo[]]$Files,
+        [Parameter(Mandatory)][string]$Destination
+    )
+    Ensure-Dir $Destination
+
+    $copied = @()
+    foreach ($f in $Files) {
+        $dest = Join-Path $Destination $f.Name
+        Copy-Item -LiteralPath $f.FullName -Destination $dest -Force
+        $copied += $dest
+        Write-Log "Copied: $($f.FullName) -> $dest" "OK"
+    }
+    return $copied
 }
 
 # ------------------------- Summary -------------------------
@@ -261,17 +252,13 @@ $summary = [ordered]@{
     userDesktop         = $null
     userAppData         = $null
     taskbarPinnedFolder = $null
-    foundLink           = $null
-    foundPs1            = $null
-    copiedToDesktop     = $null
-    copiedToTaskbar     = $null
-    copiedToCTemp       = $null
+    lnkCountFound        = 0
+    ps1CountFound        = 0
+    copiedLnkToDesktop   = @()
+    copiedLnkToTaskbar   = @()
+    copiedPs1ToCTemp     = @()
     hashes              = [ordered]@{
-        linkSourceSha256  = $null
-        linkDesktopSha256 = $null
-        linkTaskbarSha256 = $null
-        ps1SourceSha256   = $null
-        ps1CTempSha256    = $null
+        zipSha256         = $null
     }
     result              = "UNKNOWN"
 }
@@ -305,6 +292,7 @@ try {
 
     $summary.downloadedZip  = $zipFile
     $summary.downloadSha256 = Get-FileHashSafe -Path $zipFile
+    $summary.hashes.zipSha256 = $summary.downloadSha256
     Write-Log "Downloaded ZIP SHA256: $($summary.downloadSha256)" "OK"
 
     $extractDir = Join-Path $sysTemp ("CS-Toolbox-Extract_" + (Get-Date -Format "yyyyMMdd_HHmmss") + "_" + ([guid]::NewGuid().ToString("N").Substring(0,8)))
@@ -315,43 +303,25 @@ try {
     Expand-Archive -LiteralPath $zipFile -DestinationPath $extractDir -Force
     Write-Log "Extract complete." "OK"
 
-    $lnk = Find-FirstMatch -Root $extractDir -Patterns @(
-        "*ConnectSeure*Toolbox*Launcher*.lnk",
-        "*ConnectSecure*Toolbox*Launcher*.lnk",
-        "*CS-Toolbox*Launcher*.lnk",
-        "*Toolbox*Launcher*.lnk",
-        "*.lnk"
-    )
-    $ps1 = Find-FirstMatch -Root $extractDir -Patterns @(
-        "*CS-Toolbox-Launcher-DevTools-ZeroTouch.ps1",
-        "*ZeroTouch*.ps1"
-    )
+    # Find ALL files by extension
+    $lnkFiles = @(Get-AllFilesByExtension -Root $extractDir -Extension ".lnk")
+    $ps1Files = @(Get-AllFilesByExtension -Root $extractDir -Extension ".ps1")
 
-    if (-not $lnk) { throw "Could not find a .lnk inside extracted contents." }
-    if (-not $ps1) { throw "Could not find the ZeroTouch .ps1 inside extracted contents." }
+    $summary.lnkCountFound = $lnkFiles.Count
+    $summary.ps1CountFound = $ps1Files.Count
 
-    $summary.foundLink = $lnk
-    $summary.foundPs1  = $ps1
-    Write-Log "Found LNK: $lnk" "OK"
-    Write-Log "Found PS1: $ps1" "OK"
+    if ($lnkFiles.Count -eq 0) { throw "No .lnk files found in extracted zip." }
+    if ($ps1Files.Count -eq 0) { throw "No .ps1 files found in extracted zip." }
 
-    $summary.hashes.linkSourceSha256 = Get-FileHashSafe -Path $lnk
-    $summary.hashes.ps1SourceSha256  = Get-FileHashSafe -Path $ps1
-
-    if (-not $Silent) {
-        Write-Host ""
-        Write-Host "Hashes:" -ForegroundColor Cyan
-        Write-Host "  ZIP SHA256 : $($summary.downloadSha256)"
-        Write-Host "  LNK SHA256 : $($summary.hashes.linkSourceSha256)"
-        Write-Host "  PS1 SHA256 : $($summary.hashes.ps1SourceSha256)"
-        Write-Host ""
-    }
+    Write-Log "Found .lnk files: $($lnkFiles.Count)" "OK"
+    Write-Log "Found .ps1 files: $($ps1Files.Count)" "OK"
 
     if (-not $Silent -and -not $ExportOnly) {
+        Write-Host ""
         Write-Host "Planned actions:" -ForegroundColor Cyan
-        if ($Desktop) { Write-Host " - Copy LNK to Desktop: $desktopPath" }
-        if ($Taskbar) { Write-Host " - Copy LNK to Taskbar pinned folder: $taskbarDir" }
-        Write-Host " - Copy PS1 to C:\Temp"
+        if ($Desktop) { Write-Host " - Copy ALL .lnk to Desktop: $desktopPath" }
+        if ($Taskbar) { Write-Host " - Copy ALL .lnk to Taskbar pinned folder: $taskbarDir" }
+        Write-Host " - Copy ALL .ps1 to C:\Temp"
         Write-Host ""
         $ans = Read-Host "Proceed? (Y/N)"
         if ($ans -notin @('Y','y')) { throw "User cancelled." }
@@ -365,28 +335,15 @@ try {
         exit 0
     }
 
-    $ps1Dest = Join-Path $DeployRoot (Split-Path -Leaf $ps1)
-    Copy-Item -LiteralPath $ps1 -Destination $ps1Dest -Force
-    $summary.copiedToCTemp = $ps1Dest
-    $summary.hashes.ps1CTempSha256 = Get-FileHashSafe -Path $ps1Dest
-    Write-Log "Copied PS1 to: $ps1Dest" "OK"
+    # Copy ALL PS1 -> C:\Temp
+    $summary.copiedPs1ToCTemp = Copy-AllFiles -Files $ps1Files -Destination $DeployRoot
 
+    # Copy ALL LNK -> Desktop and/or Taskbar
     if ($Desktop) {
-        Ensure-Dir $desktopPath
-        $lnkDest = Join-Path $desktopPath (Split-Path -Leaf $lnk)
-        Copy-Item -LiteralPath $lnk -Destination $lnkDest -Force
-        $summary.copiedToDesktop = $lnkDest
-        $summary.hashes.linkDesktopSha256 = Get-FileHashSafe -Path $lnkDest
-        Write-Log "Copied LNK to Desktop: $lnkDest" "OK"
+        $summary.copiedLnkToDesktop = Copy-AllFiles -Files $lnkFiles -Destination $desktopPath
     }
-
     if ($Taskbar) {
-        Ensure-Dir $taskbarDir
-        $tbDest = Join-Path $taskbarDir (Split-Path -Leaf $lnk)
-        Copy-Item -LiteralPath $lnk -Destination $tbDest -Force
-        $summary.copiedToTaskbar = $tbDest
-        $summary.hashes.linkTaskbarSha256 = Get-FileHashSafe -Path $tbDest
-        Write-Log "Copied LNK to Taskbar pinned folder: $tbDest" "OK"
+        $summary.copiedLnkToTaskbar = Copy-AllFiles -Files $lnkFiles -Destination $taskbarDir
     }
 
     $summary.result = "SUCCESS"
@@ -399,7 +356,7 @@ catch {
 }
 finally {
     $summary.finishedAt = (Get-Date).ToString('o')
-    ($summary | ConvertTo-Json -Depth 12) | Set-Content -Path $ExportJson -Encoding UTF8
+    ($summary | ConvertTo-Json -Depth 14) | Set-Content -Path $ExportJson -Encoding UTF8
     Write-Log "Summary exported to: $ExportJson" "INFO"
     Write-Log "Done. Result=$($summary.result)" "INFO"
 }
