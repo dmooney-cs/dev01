@@ -1,11 +1,21 @@
 <# =================================================================================================
- CS-Toolbox-3xDesktopIcon.ps1  (v1.1)
+ CS-Toolbox-3xDesktopIcon.ps1  (v1.2 - robust ZIP validation)
 
  One-liner friendly:
    irm https://raw.githubusercontent.com/dmooney-cs/dev01/main/CS-Toolbox-3xDesktopIcon.ps1 | iex
 
- Default ZipUrl:
-   (Set to your WORKING binary URL form; script also auto-fixes blob URLs)
+ - Downloads ZIP (3 attempts) with strong validation (rejects HTML, verifies ZIP structure)
+ - Extracts to SYSTEM temp (C:\Windows\Temp)
+ - Copies:
+     • Launcher .lnk -> interactive user's Desktop and/or Taskbar pinned folder
+     • CS-Toolbox-Launcher-DevTools-ZeroTouch.ps1 -> C:\Temp
+
+ Switches:
+   -ZipUrl     : override ZIP URL
+   -Desktop    : copy LNK to Desktop
+   -Taskbar    : copy LNK to Taskbar pinned folder
+   -Silent     : no prompts; minimal console output (still logs + exports summary)
+   -ExportOnly : export JSON summary to C:\Temp\collected-info and exit
 ================================================================================================= #>
 
 #requires -version 5.1
@@ -13,8 +23,8 @@
 param(
     [Parameter(Mandatory=$false)]
     [ValidateNotNullOrEmpty()]
-    # IMPORTANT: default should NOT be /blob/
-    [string]$ZipUrl = "https://github.com/dmooney-cs/dev01/raw/refs/heads/main/prod-01-01.zip",
+    # Default should be a REAL download URL (NOT /blob/)
+    [string]$ZipUrl = "https://github.com/dmooney-cs/dev01/raw/refs/heads/main/Toolbox-Launchers.zip",
 
     [switch]$Desktop,
     [switch]$Taskbar,
@@ -29,7 +39,7 @@ $ErrorActionPreference = 'Stop'
 
 if (-not $Desktop -and -not $Taskbar) { $Desktop = $true }
 
-# Paths
+# ------------------------- Paths -------------------------
 $DeployRoot = "C:\Temp"
 $CollectedInfoDir = Join-Path $DeployRoot "collected-info"
 $LogFile = Join-Path $DeployRoot "CS-Toolbox-3xDesktopIcon.log"
@@ -106,17 +116,12 @@ function Get-FileHashSafe {
 function Resolve-GitHubDownloadUrl {
     param([Parameter(Mandatory)][ValidateNotNullOrEmpty()][string]$Url)
 
-    # If user gave a blob URL, convert to raw
-    # https://github.com/ORG/REPO/blob/BRANCH/path/file.zip
-    # => https://raw.githubusercontent.com/ORG/REPO/BRANCH/path/file.zip
+    # Convert blob -> raw.githubusercontent.com
     if ($Url -match '^https://github\.com/([^/]+)/([^/]+)/blob/([^/]+)/(.+)$') {
-        $org = $Matches[1]; $repo = $Matches[2]; $branch = $Matches[3]; $path = $Matches[4]
-        return "https://raw.githubusercontent.com/$org/$repo/$branch/$path"
+        return "https://raw.githubusercontent.com/$($Matches[1])/$($Matches[2])/$($Matches[3])/$($Matches[4])"
     }
 
-    # If they used raw host but incorrectly included /refs/heads/ in raw host URL, fix it:
-    # https://raw.githubusercontent.com/org/repo/refs/heads/main/file
-    # => https://raw.githubusercontent.com/org/repo/main/file
+    # Fix raw host misuse: /refs/heads/ in raw host URLs
     if ($Url -match '^https://raw\.githubusercontent\.com/([^/]+)/([^/]+)/refs/heads/([^/]+)/(.+)$') {
         return "https://raw.githubusercontent.com/$($Matches[1])/$($Matches[2])/$($Matches[3])/$($Matches[4])"
     }
@@ -124,51 +129,56 @@ function Resolve-GitHubDownloadUrl {
     return $Url
 }
 
-function Test-ZipLooksValid {
-    param([Parameter(Mandatory)][string]$Path)
-
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
-
-    # Quick signature check: ZIP usually starts with 'PK'
-    $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
-    try {
-        $buf = New-Object byte[] 8
-        $read = $fs.Read($buf, 0, $buf.Length)
-        if ($read -lt 2) { return $false }
-        $sig = [System.Text.Encoding]::ASCII.GetString($buf, 0, 2)
-        if ($sig -ne 'PK') { return $false }
-        return $true
-    } finally {
-        $fs.Dispose()
-    }
-}
-
 function Test-DownloadedIsHtml {
     param([Parameter(Mandatory)][string]$Path)
+    $len = (Get-Item -LiteralPath $Path).Length
+    if ($len -le 0) { return $true }
 
-    # Read a small chunk and look for HTML markers
     $bytes = [System.IO.File]::ReadAllBytes($Path)
-    $len = [Math]::Min($bytes.Length, 4096)
-    $head = [System.Text.Encoding]::UTF8.GetString($bytes, 0, $len)
+    $take = [Math]::Min($bytes.Length, 4096)
+    $head = [System.Text.Encoding]::UTF8.GetString($bytes, 0, $take)
 
-    if ($head -match '<!DOCTYPE\s+html' -or $head -match '<html' -or $head -match 'github\.com' -and $head -match '<title>') {
-        return $true
-    }
-    return $false
+    return (
+        $head -match '<!DOCTYPE\s+html' -or
+        $head -match '<html' -or
+        ($head -match '<title>' -and $head -match 'GitHub') -or
+        $head -match 'github\.com' -and $head -match '<body'
+    )
 }
 
-function Download-GitHubZipWithRetry {
+function Test-ZipOpens {
+    param([Parameter(Mandatory)][string]$Path)
+    try {
+        Add-Type -AssemblyName System.IO.Compression.FileSystem -ErrorAction SilentlyContinue | Out-Null
+        $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        try {
+            $zip = New-Object System.IO.Compression.ZipArchive($fs, [System.IO.Compression.ZipArchiveMode]::Read, $false)
+            try {
+                # Touch entries to force central directory parsing
+                $null = $zip.Entries.Count
+                return $true
+            } finally {
+                $zip.Dispose()
+            }
+        } finally {
+            $fs.Dispose()
+        }
+    } catch {
+        return $false
+    }
+}
+
+function Download-FileValidatedWithRetry {
     param(
         [Parameter(Mandatory)][ValidateNotNullOrEmpty()]
         [string]$Url,
 
-        [Parameter(Mandatory)]
-        [string]$OutFile,
+        [Parameter(Mandatory)][string]$OutFile,
 
         [int]$MaxAttempts = 3
     )
 
-    # TLS hardening
+    # TLS hardening (PS 5.1)
     try {
         [Net.ServicePointManager]::SecurityProtocol =
             [Net.SecurityProtocolType]::Tls12 -bor
@@ -186,6 +196,7 @@ function Download-GitHubZipWithRetry {
                 Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
             }
 
+            # Prefer BITS; fallback to IWR
             $usedBits = $false
             try {
                 if (Get-Command Start-BitsTransfer -ErrorAction SilentlyContinue) {
@@ -197,26 +208,35 @@ function Download-GitHubZipWithRetry {
             }
 
             if (-not $usedBits) {
-                Invoke-WebRequest -Uri $Url -OutFile $OutFile -UseBasicParsing -ErrorAction Stop
+                # Encourage binary transfer + reduce odd content-type issues
+                Invoke-WebRequest -Uri $Url -OutFile $OutFile -UseBasicParsing -Headers @{ "Accept"="application/octet-stream" } -ErrorAction Stop
             }
 
             if (-not (Test-Path -LiteralPath $OutFile -PathType Leaf)) {
                 throw "File not present after download"
             }
 
-            # Validate: must not be HTML, must look like zip
+            # Reject HTML downloads early
             if (Test-DownloadedIsHtml -Path $OutFile) {
-                throw "Downloaded content appears to be HTML (likely a GitHub 'blob' page). Use a raw download URL."
-            }
-            if (-not (Test-ZipLooksValid -Path $OutFile)) {
-                throw "Downloaded file does not look like a ZIP (missing 'PK' signature)."
+                throw "Downloaded content appears to be HTML (not a ZIP). This usually happens with GitHub blob/redirect pages."
             }
 
-            Write-Log "Download successful and validated as ZIP on attempt $attempt" "OK"
+            # Validate ZIP by actually opening it (catches your exact central-directory error)
+            if (-not (Test-ZipOpens -Path $OutFile)) {
+                throw "Downloaded file is not a valid ZIP (cannot open ZipArchive / central directory missing)."
+            }
+
+            Write-Log "Download validated as a real ZIP on attempt $attempt" "OK"
             return
         }
         catch {
             Write-Log "Attempt $attempt failed: $($_.Exception.Message)" "WARN"
+
+            # Clean up bad file before retry
+            if (Test-Path -LiteralPath $OutFile) {
+                Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
+            }
+
             if ($attempt -lt $MaxAttempts) {
                 $delay = 3 * $attempt
                 Write-Log "Retrying in $delay seconds..." "INFO"
@@ -228,7 +248,7 @@ function Download-GitHubZipWithRetry {
     }
 }
 
-# --------- Summary ---------
+# ------------------------- Summary -------------------------
 $summary = [ordered]@{
     startedAt           = (Get-Date).ToString('o')
     zipUrlInput         = $ZipUrl
@@ -261,9 +281,7 @@ Write-Log "Starting. ZipUrlInput='$ZipUrl' Desktop=$Desktop Taskbar=$Taskbar Sil
 try {
     $zipResolved = Resolve-GitHubDownloadUrl -Url $ZipUrl
     $summary.zipUrlResolved = $zipResolved
-    if ($zipResolved -ne $ZipUrl) {
-        Write-Log "Resolved GitHub URL -> $zipResolved" "OK"
-    }
+    if ($zipResolved -ne $ZipUrl) { Write-Log "Resolved GitHub URL -> $zipResolved" "OK" }
 
     $user = Get-LoggedOnUserSid
     $summary.interactiveUser = $user.UserName
@@ -283,9 +301,9 @@ try {
 
     $zipFile = Join-Path $sysTemp ("ToolboxPayload_" + (Get-Date -Format "yyyyMMdd_HHmmss") + "_" + ([guid]::NewGuid().ToString("N").Substring(0,8)) + ".zip")
 
-    Download-GitHubZipWithRetry -Url $zipResolved -OutFile $zipFile -MaxAttempts 3
+    Download-FileValidatedWithRetry -Url $zipResolved -OutFile $zipFile -MaxAttempts 3
 
-    $summary.downloadedZip = $zipFile
+    $summary.downloadedZip  = $zipFile
     $summary.downloadSha256 = Get-FileHashSafe -Path $zipFile
     Write-Log "Downloaded ZIP SHA256: $($summary.downloadSha256)" "OK"
 
@@ -342,7 +360,7 @@ try {
     if ($ExportOnly) {
         $summary.result = "EXPORTONLY"
         $summary.finishedAt = (Get-Date).ToString('o')
-        ($summary | ConvertTo-Json -Depth 10) | Set-Content -Path $ExportJson -Encoding UTF8
+        ($summary | ConvertTo-Json -Depth 12) | Set-Content -Path $ExportJson -Encoding UTF8
         if (-not $Silent) { Write-Host "Exported: $ExportJson" }
         exit 0
     }
