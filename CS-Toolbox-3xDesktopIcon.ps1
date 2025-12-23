@@ -1,15 +1,19 @@
 <# =================================================================================================
- CS-Toolbox-3xDesktopIcon.ps1  (v1.8 - strict-mode safe normalize)
+ CS-Toolbox-3xDesktopIcon.ps1  (v1.9 - overwrite-in-place, no (2) duplicates)
 
- Fix:
-  - Normalize-ExtractRoot now uses @() around Get-ChildItem results so .Count always exists.
+ Change requested:
+  - NEVER create "_(2)" / " 2" duplicate files when destination already exists.
+  - ALWAYS overwrite existing destination files using -Force.
 
  Uses proven bootstrapper strategy:
   - Download Toolbox-Launchers.zip (3 attempts)
   - Extract to SYSTEM temp
   - Normalize folder structure (flatten single top folder)
   - Unblock extracted files
-  - Copy ALL .lnk to Desktop/Taskbar, ALL .ps1 to C:\Temp
+  - Copy ALL .lnk to Desktop/Taskbar, ALL .ps1 to C:\Temp (overwrite existing)
+  - -ExportOnly exports JSON to C:\Temp\collected-info and exits
+
+ NOTE: Runs well elevated; resolves the *interactive* user's Desktop/Taskbar paths via HKU:\SID.
 ================================================================================================= #>
 
 #requires -version 5.1
@@ -39,7 +43,9 @@ $ExportJson       = Join-Path $CollectedInfoDir "CS-Toolbox-3xDesktopIcon.json"
 
 function Ensure-Dir {
     param([Parameter(Mandatory)][string]$Path)
-    if (-not (Test-Path -LiteralPath $Path)) { New-Item -ItemType Directory -Path $Path -Force | Out-Null }
+    if (-not (Test-Path -LiteralPath $Path)) {
+        New-Item -ItemType Directory -Path $Path -Force | Out-Null
+    }
 }
 Ensure-Dir $DeployRoot
 Ensure-Dir $CollectedInfoDir
@@ -172,6 +178,7 @@ function Get-AllFilesByExtension {
         Where-Object { $_.Extension -ieq $Extension }
 }
 
+# ------------------------- OVERWRITE COPY (NO DUPLICATES) -------------------------
 function Copy-AllFiles {
     param(
         [Parameter(Mandatory)][System.IO.FileInfo[]]$Files,
@@ -181,19 +188,15 @@ function Copy-AllFiles {
 
     $copied = @()
     foreach ($f in $Files) {
-        $base = [System.IO.Path]::GetFileNameWithoutExtension($f.Name)
-        $ext  = $f.Extension
-        $dest = Join-Path $Destination ($base + $ext)
-
-        $i = 2
-        while (Test-Path -LiteralPath $dest) {
-            $dest = Join-Path $Destination ("{0}_({1}){2}" -f $base, $i, $ext)
-            $i++
+        # Keep exact original name; overwrite in place if it exists
+        $dest = Join-Path $Destination $f.Name
+        try {
+            Copy-Item -LiteralPath $f.FullName -Destination $dest -Force -ErrorAction Stop
+            $copied += $dest
+            Write-Log "Copied (overwrote if existed): $($f.FullName) -> $dest" "OK"
+        } catch {
+            Write-Log ("WARN: Failed to copy (overwrite) {0} -> {1}: {2}" -f $f.FullName, $dest, $_.Exception.Message) "WARN"
         }
-
-        Copy-Item -LiteralPath $f.FullName -Destination $dest -Force
-        $copied += $dest
-        Write-Log "Copied: $($f.FullName) -> $dest" "OK"
     }
     return $copied
 }
@@ -275,9 +278,9 @@ try {
     if (-not $Silent -and -not $ExportOnly) {
         Write-Host ""
         Write-Host "Planned actions:" -ForegroundColor Cyan
-        if ($Desktop) { Write-Host " - Copy ALL .lnk to Desktop: $desktopPath" }
-        if ($Taskbar) { Write-Host " - Copy ALL .lnk to Taskbar pinned folder: $taskbarDir" }
-        Write-Host " - Copy ALL .ps1 to C:\Temp"
+        if ($Desktop) { Write-Host " - Copy ALL .lnk to Desktop: $desktopPath (overwrite existing)" }
+        if ($Taskbar) { Write-Host " - Copy ALL .lnk to Taskbar pinned folder: $taskbarDir (overwrite existing)" }
+        Write-Host " - Copy ALL .ps1 to C:\Temp (overwrite existing)"
         Write-Host ""
         $ans = Read-Host "Proceed? (Y/N)"
         if ($ans -notin @('Y','y')) { throw "User cancelled." }
