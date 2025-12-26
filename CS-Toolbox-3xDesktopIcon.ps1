@@ -1,7 +1,8 @@
 <# =================================================================================================
- CS-Toolbox-3xDesktopIcon.ps1  (v1.9 - overwrite-in-place, no (2) duplicates)
+ CS-Toolbox-3xDesktopIcon.ps1  (v2.0 - overwrite-in-place, no (2) duplicates, copy .ico to C:\Temp)
 
  Change requested:
+  - Copy ALL .ico files to C:\Temp (overwrite existing)
   - NEVER create "_(2)" / " 2" duplicate files when destination already exists.
   - ALWAYS overwrite existing destination files using -Force.
 
@@ -10,7 +11,7 @@
   - Extract to SYSTEM temp
   - Normalize folder structure (flatten single top folder)
   - Unblock extracted files
-  - Copy ALL .lnk to Desktop/Taskbar, ALL .ps1 to C:\Temp (overwrite existing)
+  - Copy ALL .lnk to Desktop/Taskbar, ALL .ps1 to C:\Temp, ALL .ico to C:\Temp (overwrite existing)
   - -ExportOnly exports JSON to C:\Temp\collected-info and exits
 
  NOTE: Runs well elevated; resolves the *interactive* user's Desktop/Taskbar paths via HKU:\SID.
@@ -27,11 +28,14 @@ param(
     [switch]$Taskbar,
     [switch]$Silent,
 
+    # REQUIRED BY YOUR TOOLING:
+    # Scripts must have -ExportOnly to export to collected-info for cookbook commands.
     [switch]$ExportOnly
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 
 if (-not $Desktop -and -not $Taskbar) { $Desktop = $true }
 
@@ -213,11 +217,16 @@ $summary = [ordered]@{
     userDesktop         = $null
     userAppData         = $null
     taskbarPinnedFolder = $null
+
     lnkCountFound       = 0
     ps1CountFound       = 0
+    icoCountFound       = 0
+
     copiedLnkToDesktop  = @()
     copiedLnkToTaskbar  = @()
     copiedPs1ToCTemp    = @()
+    copiedIcoToCTemp    = @()
+
     result              = "UNKNOWN"
 }
 
@@ -268,12 +277,15 @@ try {
 
     $lnkFiles = @(Get-AllFilesByExtension -Root $extract -Extension ".lnk")
     $ps1Files = @(Get-AllFilesByExtension -Root $extract -Extension ".ps1")
+    $icoFiles = @(Get-AllFilesByExtension -Root $extract -Extension ".ico")
 
     $summary.lnkCountFound = $lnkFiles.Count
     $summary.ps1CountFound = $ps1Files.Count
+    $summary.icoCountFound = $icoFiles.Count
 
     Write-Log "Found .lnk files: $($lnkFiles.Count)" "OK"
     Write-Log "Found .ps1 files: $($ps1Files.Count)" "OK"
+    Write-Log "Found .ico files: $($icoFiles.Count)" "OK"
 
     if (-not $Silent -and -not $ExportOnly) {
         Write-Host ""
@@ -281,6 +293,7 @@ try {
         if ($Desktop) { Write-Host " - Copy ALL .lnk to Desktop: $desktopPath (overwrite existing)" }
         if ($Taskbar) { Write-Host " - Copy ALL .lnk to Taskbar pinned folder: $taskbarDir (overwrite existing)" }
         Write-Host " - Copy ALL .ps1 to C:\Temp (overwrite existing)"
+        Write-Host " - Copy ALL .ico to C:\Temp (overwrite existing)"
         Write-Host ""
         $ans = Read-Host "Proceed? (Y/N)"
         if ($ans -notin @('Y','y')) { throw "User cancelled." }
@@ -295,6 +308,8 @@ try {
     }
 
     if ($ps1Files.Count -gt 0) { $summary.copiedPs1ToCTemp = Copy-AllFiles -Files $ps1Files -Destination $DeployRoot }
+    if ($icoFiles.Count -gt 0) { $summary.copiedIcoToCTemp = Copy-AllFiles -Files $icoFiles -Destination $DeployRoot }
+
     if ($Desktop -and $lnkFiles.Count -gt 0) { $summary.copiedLnkToDesktop = Copy-AllFiles -Files $lnkFiles -Destination $desktopPath }
     if ($Taskbar -and $lnkFiles.Count -gt 0) { $summary.copiedLnkToTaskbar = Copy-AllFiles -Files $lnkFiles -Destination $taskbarDir }
 
