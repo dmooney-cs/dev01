@@ -1,5 +1,5 @@
 <# =================================================================================================
- CS-Toolbox-3xDesktopIcon.ps1  (v2.1 - ps1/ico moved to CS-Toolbox-TEMP\Launchers)
+ CS-Toolbox-3xDesktopIcon.ps1  (v2.2 - ps1/ico moved to CS-Toolbox-TEMP\Launchers)
 
  Change requested:
   - Copy ALL .ps1 files to C:\CS-Toolbox-TEMP\Launchers (overwrite existing)
@@ -7,6 +7,8 @@
   - NEVER create "_(2)" / " 2" duplicate files when destination already exists.
   - ALWAYS overwrite existing destination files using -Force.
   - -ExportOnly exports JSON to C:\CS-Toolbox-TEMP\Launchers\collected-info and exits
+  - NO prompts
+  - End reminder lists the THREE Desktop icons by reading the .lnk files copied
 
  Uses proven bootstrapper strategy:
   - Download Toolbox-Launchers.zip (3 attempts)
@@ -193,7 +195,6 @@ function Copy-AllFiles {
 
     $copied = @()
     foreach ($f in $Files) {
-        # Keep exact original name; overwrite in place if it exists
         $dest = Join-Path $Destination $f.Name
         try {
             Copy-Item -LiteralPath $f.FullName -Destination $dest -Force -ErrorAction Stop
@@ -204,6 +205,32 @@ function Copy-AllFiles {
         }
     }
     return $copied
+}
+
+# ------------------------- Safe "Press any key" -------------------------
+function Wait-AnyKey {
+    param([string]$Prompt = "Press any key to close this window...")
+
+    Write-Host $Prompt -ForegroundColor Yellow
+
+    # Try RawUI first (ConsoleHost typically)
+    try {
+        if ($Host -and $Host.UI -and $Host.UI.RawUI) {
+            $null = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
+            return
+        }
+    } catch { }
+
+    # Try System.Console
+    try {
+        $null = [System.Console]::ReadKey($true)
+        return
+    } catch { }
+
+    # Final fallback: Enter (only if key reading truly isn't available)
+    try {
+        $null = Read-Host "Press Enter to close this window"
+    } catch { }
 }
 
 # ------------------------- Summary -------------------------
@@ -288,18 +315,6 @@ try {
     Write-Log "Found .ps1 files: $($ps1Files.Count)" "OK"
     Write-Log "Found .ico files: $($icoFiles.Count)" "OK"
 
-    if (-not $Silent -and -not $ExportOnly) {
-        Write-Host ""
-        Write-Host "Planned actions:" -ForegroundColor Cyan
-        if ($Desktop) { Write-Host " - Copy ALL .lnk to Desktop: $desktopPath (overwrite existing)" }
-        if ($Taskbar) { Write-Host " - Copy ALL .lnk to Taskbar pinned folder: $taskbarDir (overwrite existing)" }
-        Write-Host " - Copy ALL .ps1 to $DeployRoot (overwrite existing)"
-        Write-Host " - Copy ALL .ico to $DeployRoot (overwrite existing)"
-        Write-Host ""
-        $ans = Read-Host "Proceed? (Y/N)"
-        if ($ans -notin @('Y','y')) { throw "User cancelled." }
-    }
-
     if ($ExportOnly) {
         $summary.result = "EXPORTONLY"
         $summary.finishedAt = (Get-Date).ToString('o')
@@ -315,6 +330,42 @@ try {
     if ($Taskbar -and $lnkFiles.Count -gt 0) { $summary.copiedLnkToTaskbar = Copy-AllFiles -Files $lnkFiles -Destination $taskbarDir }
 
     $summary.result = "SUCCESS"
+
+    # ------------------------- End reminder: read the actual copied .lnk icon names -------------------------
+    if (-not $Silent) {
+        $iconNames = @()
+
+        if ($Desktop -and $summary.copiedLnkToDesktop -and $summary.copiedLnkToDesktop.Count -gt 0) {
+            foreach ($p in $summary.copiedLnkToDesktop) {
+                try {
+                    if (Test-Path -LiteralPath $p -PathType Leaf) {
+                        $iconNames += ([IO.Path]::GetFileNameWithoutExtension($p))
+                    }
+                } catch { }
+            }
+        }
+
+        # Deduplicate + stable order
+        $iconNames = @($iconNames | Where-Object { $_ } | Select-Object -Unique)
+
+        Write-Host ""
+        Write-Host "All set." -ForegroundColor Green
+        Write-Host ""
+
+        if ($Desktop) {
+            if ($iconNames.Count -gt 0) {
+                Write-Host "You should now see these Desktop icons:" -ForegroundColor Cyan
+                for ($i = 0; $i -lt $iconNames.Count; $i++) {
+                    Write-Host ("  {0}) {1}" -f ($i + 1), $iconNames[$i])
+                }
+            } else {
+                Write-Host "Desktop shortcuts were copied, but icon names could not be read." -ForegroundColor Yellow
+            }
+            Write-Host ""
+        }
+
+        Wait-AnyKey -Prompt "Press any key to close this window..."
+    }
 }
 catch {
     $summary.result = "FAILED"
