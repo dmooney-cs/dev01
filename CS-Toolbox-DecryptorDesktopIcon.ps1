@@ -1,5 +1,5 @@
 <# =================================================================================================
- CS-Toolbox-DecryptorDesktopIcon.ps1  (v1.2)
+ CS-Toolbox-DecryptorDesktopIcon.ps1  (v1.3)
 
  Landing rules (FINAL):
   - .ps1 + .ico  -> C:\CS-Toolbox-TEMP\Launchers
@@ -31,8 +31,8 @@ $LauncherRoot    = "C:\CS-Toolbox-TEMP\Launchers"
 $CollectedInfo   = "C:\CS-Toolbox-TEMP\Collected-Info"
 $WorkRoot        = Join-Path $DecryptRoot "_work"
 
-$LogFile   = Join-Path $CollectedInfo "CS-Toolbox-DecryptorDesktopIcon.log"
-$ExportJson= Join-Path $CollectedInfo "CS-Toolbox-DecryptorDesktopIcon.json"
+$LogFile    = Join-Path $CollectedInfo "CS-Toolbox-DecryptorDesktopIcon.log"
+$ExportJson = Join-Path $CollectedInfo "CS-Toolbox-DecryptorDesktopIcon.json"
 
 function Ensure-Dir {
     param([string]$Path)
@@ -95,12 +95,16 @@ function Invoke-Download {
 }
 
 function Normalize-Extract {
-    param($Root)
-    $dirs = Get-ChildItem $Root -Directory
-    $files= Get-ChildItem $Root -File
+    param([string]$Root)
+
+    # Force arrays so .Count is always valid under StrictMode
+    $dirs  = @(Get-ChildItem -LiteralPath $Root -Directory -Force -ErrorAction SilentlyContinue)
+    $files = @(Get-ChildItem -LiteralPath $Root -File      -Force -ErrorAction SilentlyContinue)
+
     if ($dirs.Count -eq 1 -and $files.Count -eq 0) {
-        Get-ChildItem $dirs[0].FullName -Force | Move-Item -Destination $Root -Force
-        Remove-Item $dirs[0].FullName -Recurse -Force
+        $top = $dirs[0].FullName
+        Get-ChildItem -LiteralPath $top -Force | Move-Item -Destination $Root -Force
+        Remove-Item -LiteralPath $top -Recurse -Force
     }
 }
 
@@ -119,12 +123,12 @@ function Copy-All {
 
 # ------------------------- Summary -------------------------
 $summary = [ordered]@{
-    startedAt = (Get-Date).ToString('o')
-    zipUrl = $ZipUrl
-    launcherRoot = $LauncherRoot
+    startedAt     = (Get-Date).ToString('o')
+    zipUrl        = $ZipUrl
+    launcherRoot  = $LauncherRoot
     collectedInfo = $CollectedInfo
-    workRoot = $WorkRoot
-    result = "UNKNOWN"
+    workRoot      = $WorkRoot
+    result        = "UNKNOWN"
 }
 
 Write-Log "Starting Decryptor Desktop Icon deploy"
@@ -143,9 +147,10 @@ try {
     Expand-Archive $zip $extract -Force
     Normalize-Extract $extract
 
-    $ps1 = Get-ChildItem $extract -Recurse -Filter *.ps1
-    $ico = Get-ChildItem $extract -Recurse -Filter *.ico
-    $lnk = Get-ChildItem $extract -Recurse -Filter *.lnk
+    # Force arrays so .Count is always valid under StrictMode
+    $ps1 = @(Get-ChildItem -LiteralPath $extract -Recurse -File -Filter *.ps1 -Force -ErrorAction SilentlyContinue)
+    $ico = @(Get-ChildItem -LiteralPath $extract -Recurse -File -Filter *.ico -Force -ErrorAction SilentlyContinue)
+    $lnk = @(Get-ChildItem -LiteralPath $extract -Recurse -File -Filter *.lnk -Force -ErrorAction SilentlyContinue)
 
     $summary.ps1Count = $ps1.Count
     $summary.icoCount = $ico.Count
@@ -154,9 +159,9 @@ try {
     if ($ExportOnly) {
         $summary.result = "EXPORTONLY"
     } else {
-        if ($ps1) { $summary.ps1Copied = Copy-All $ps1 $LauncherRoot }
-        if ($ico) { $summary.icoCopied = Copy-All $ico $LauncherRoot }
-        if ($lnk) { $summary.lnkCopied = Copy-All $lnk $desktop }
+        if ($ps1.Count -gt 0) { $summary.ps1Copied = Copy-All $ps1 $LauncherRoot }
+        if ($ico.Count -gt 0) { $summary.icoCopied = Copy-All $ico $LauncherRoot }
+        if ($lnk.Count -gt 0) { $summary.lnkCopied = Copy-All $lnk $desktop }
         $summary.result = "SUCCESS"
     }
 }
