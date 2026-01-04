@@ -1,18 +1,15 @@
 <# =================================================================================================
- CS-Toolbox-DecryptorDesktopIcon.ps1  (v1.0)
+ CS-Toolbox-DecryptorDesktopIcon.ps1  (v1.1)
 
- Change requested:
+ Landing changes:
+  - Logs + Export JSON now go to: C:\CS-Toolbox-TEMP\Collected-Info
+  - Download/extract staging now goes under: C:\CS-Toolbox-TEMP\Decrypt\_work (instead of C:\Windows\Temp)
+
+ Requested behavior retained:
   - Copy ALL .ico and .ps1 files to C:\CS-Toolbox-TEMP\Decrypt (overwrite existing)
   - Copy ALL .lnk files to the ACTIVE (interactive) user's Desktop (overwrite existing)
-  - Create destination folder if missing
+  - Create destination folder(s) if missing
   - Runs elevated/admin; resolves interactive user via Win32_ComputerSystem.UserName + HKU:\SID paths
-
- Uses proven bootstrapper strategy:
-  - Download Toolbox-Launchers.zip (3 attempts)
-  - Extract to SYSTEM temp
-  - Normalize folder structure (flatten single top folder)
-  - Unblock extracted files
-  - Copy ALL .lnk to user's Desktop, ALL .ps1 + .ico to C:\CS-Toolbox-TEMP\Decrypt (overwrite existing)
   - -ExportOnly exports JSON to collected-info and exits
 ================================================================================================= #>
 
@@ -35,8 +32,14 @@ $ProgressPreference = 'SilentlyContinue'
 
 # ------------------------- Paths -------------------------
 $DeployRoot       = "C:\CS-Toolbox-TEMP\Decrypt"
-$CollectedInfoDir = Join-Path $DeployRoot "collected-info"
-$LogFile          = Join-Path $DeployRoot "CS-Toolbox-DecryptorDesktopIcon.log"
+
+# Central toolbox audit/export location (changed)
+$CollectedInfoDir = "C:\CS-Toolbox-TEMP\Collected-Info"
+
+# Work/staging area (changed)
+$WorkRoot         = Join-Path $DeployRoot "_work"
+
+$LogFile          = Join-Path $CollectedInfoDir "CS-Toolbox-DecryptorDesktopIcon.log"
 $ExportJson       = Join-Path $CollectedInfoDir "CS-Toolbox-DecryptorDesktopIcon.json"
 
 function Ensure-Dir {
@@ -45,8 +48,10 @@ function Ensure-Dir {
         New-Item -ItemType Directory -Path $Path -Force | Out-Null
     }
 }
+
 Ensure-Dir $DeployRoot
 Ensure-Dir $CollectedInfoDir
+Ensure-Dir $WorkRoot
 
 function Write-Log {
     param(
@@ -143,13 +148,9 @@ function Normalize-ExtractRoot {
         [Parameter(Mandatory)][string]$ZipPath
     )
 
-    $topDirs  = @(
-        Get-ChildItem -LiteralPath $ExtractPath -Directory -Force -ErrorAction SilentlyContinue
-    )
-    $topFiles = @(
-        Get-ChildItem -LiteralPath $ExtractPath -File -Force -ErrorAction SilentlyContinue |
-            Where-Object { $_.FullName -ne $ZipPath }
-    )
+    $topDirs  = @(Get-ChildItem -LiteralPath $ExtractPath -Directory -Force -ErrorAction SilentlyContinue)
+    $topFiles = @(Get-ChildItem -LiteralPath $ExtractPath -File -Force -ErrorAction SilentlyContinue |
+        Where-Object { $_.FullName -ne $ZipPath })
 
     if ($topDirs.Count -eq 1 -and $topFiles.Count -eq 0) {
         Write-Log ("Normalizing: flattening single folder {0}" -f $topDirs[0].Name) "INFO"
@@ -175,7 +176,6 @@ function Get-AllFilesByExtension {
         Where-Object { $_.Extension -ieq $Extension }
 }
 
-# ------------------------- OVERWRITE COPY (NO DUPLICATES) -------------------------
 function Copy-AllFiles {
     param(
         [Parameter(Mandatory)][System.IO.FileInfo[]]$Files,
@@ -208,6 +208,10 @@ $summary = [ordered]@{
     userSid             = $null
     userDesktop         = $null
 
+    deployRoot          = $DeployRoot
+    collectedInfoDir    = $CollectedInfoDir
+    workRoot            = $WorkRoot
+
     lnkCountFound       = 0
     ps1CountFound       = 0
     icoCountFound       = 0
@@ -220,6 +224,7 @@ $summary = [ordered]@{
 }
 
 Write-Log "Starting. ZipUrl='$ZipUrl' Silent=$Silent ExportOnly=$ExportOnly" "INFO"
+Write-Log "Landing: DeployRoot='$DeployRoot' CollectedInfoDir='$CollectedInfoDir' WorkRoot='$WorkRoot'" "INFO"
 
 try {
     try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch { }
@@ -231,14 +236,14 @@ try {
 
     $desktopPath = Get-UserShellFolderPath -Sid $user.Sid -Folder Desktop
     $summary.userDesktop = $desktopPath
-
-    $sysTemp = Join-Path $env:windir "Temp"
-    Ensure-Dir $sysTemp
+    Write-Log "Resolved Desktop: $desktopPath" "OK"
 
     $stamp   = (Get-Date -Format "yyyyMMdd_HHmmss")
     $shortId = ([guid]::NewGuid().ToString("N").Substring(0,8))
-    $zipPath = Join-Path $sysTemp ("Toolbox-Launchers_{0}_{1}.zip" -f $stamp, $shortId)
-    $extract = Join-Path $sysTemp ("CS-Decryptor-Extract_{0}_{1}" -f $stamp, $shortId)
+
+    # Work paths (changed)
+    $zipPath = Join-Path $WorkRoot ("Toolbox-Launchers_{0}_{1}.zip" -f $stamp, $shortId)
+    $extract = Join-Path $WorkRoot ("CS-Decryptor-Extract_{0}_{1}" -f $stamp, $shortId)
 
     $ok = Invoke-DownloadWithRetry -Uri $ZipUrl -OutFile $zipPath -MaxAttempts 3 -DelaySeconds 2
     if (-not $ok) { throw "Download did not succeed after 3 attempts." }
