@@ -1,28 +1,23 @@
 <# =================================================================================================
- CS-Toolbox-DecryptorDesktopIcon.ps1  (v1.1)
+ CS-Toolbox-DecryptorDesktopIcon.ps1  (v1.2)
 
- Landing changes:
-  - Logs + Export JSON now go to: C:\CS-Toolbox-TEMP\Collected-Info
-  - Download/extract staging now goes under: C:\CS-Toolbox-TEMP\Decrypt\_work (instead of C:\Windows\Temp)
+ Landing rules (FINAL):
+  - .ps1 + .ico  -> C:\CS-Toolbox-TEMP\Launchers
+  - .lnk         -> ACTIVE interactive user's Desktop
+  - Logs + JSON  -> C:\CS-Toolbox-TEMP\Collected-Info
+  - Work staging -> C:\CS-Toolbox-TEMP\Decrypt\_work
 
- Requested behavior retained:
-  - Copy ALL .ico and .ps1 files to C:\CS-Toolbox-TEMP\Decrypt (overwrite existing)
-  - Copy ALL .lnk files to the ACTIVE (interactive) user's Desktop (overwrite existing)
-  - Create destination folder(s) if missing
-  - Runs elevated/admin; resolves interactive user via Win32_ComputerSystem.UserName + HKU:\SID paths
-  - -ExportOnly exports JSON to collected-info and exits
+ Supports:
+  - Elevated execution
+  - Interactive user resolution via Win32_ComputerSystem + HKU:\SID
+  - -ExportOnly (JSON export + exit)
 ================================================================================================= #>
 
 #requires -version 5.1
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory=$false)]
-    [ValidateNotNullOrEmpty()]
     [string]$ZipUrl = "https://github.com/dmooney-cs/dev01/raw/refs/heads/main/decryptor-zip.zip",
-
     [switch]$Silent,
-
-    # REQUIRED BY YOUR TOOLING:
     [switch]$ExportOnly
 )
 
@@ -31,36 +26,34 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
 # ------------------------- Paths -------------------------
-$DeployRoot       = "C:\CS-Toolbox-TEMP\Decrypt"
+$DecryptRoot     = "C:\CS-Toolbox-TEMP\Decrypt"
+$LauncherRoot    = "C:\CS-Toolbox-TEMP\Launchers"
+$CollectedInfo   = "C:\CS-Toolbox-TEMP\Collected-Info"
+$WorkRoot        = Join-Path $DecryptRoot "_work"
 
-# Central toolbox audit/export location (changed)
-$CollectedInfoDir = "C:\CS-Toolbox-TEMP\Collected-Info"
-
-# Work/staging area (changed)
-$WorkRoot         = Join-Path $DeployRoot "_work"
-
-$LogFile          = Join-Path $CollectedInfoDir "CS-Toolbox-DecryptorDesktopIcon.log"
-$ExportJson       = Join-Path $CollectedInfoDir "CS-Toolbox-DecryptorDesktopIcon.json"
+$LogFile   = Join-Path $CollectedInfo "CS-Toolbox-DecryptorDesktopIcon.log"
+$ExportJson= Join-Path $CollectedInfo "CS-Toolbox-DecryptorDesktopIcon.json"
 
 function Ensure-Dir {
-    param([Parameter(Mandatory)][string]$Path)
+    param([string]$Path)
     if (-not (Test-Path -LiteralPath $Path)) {
         New-Item -ItemType Directory -Path $Path -Force | Out-Null
     }
 }
 
-Ensure-Dir $DeployRoot
-Ensure-Dir $CollectedInfoDir
+Ensure-Dir $DecryptRoot
+Ensure-Dir $LauncherRoot
+Ensure-Dir $CollectedInfo
 Ensure-Dir $WorkRoot
 
 function Write-Log {
     param(
-        [Parameter(Mandatory)][string]$Message,
-        [ValidateSet('INFO','WARN','ERROR','OK')][string]$Level = 'INFO'
+        [string]$Message,
+        [ValidateSet('INFO','WARN','ERROR','OK')]$Level = 'INFO'
     )
-    $ts = (Get-Date).ToString('yyyy-MM-dd HH:mm:ss')
+    $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
     $line = "[$ts][$Level] $Message"
-    Add-Content -Path $script:LogFile -Value $line -Encoding UTF8
+    Add-Content -Path $LogFile -Value $line -Encoding UTF8
     if (-not $Silent) {
         switch ($Level) {
             'ERROR' { Write-Host $line -ForegroundColor Red }
@@ -70,237 +63,113 @@ function Write-Log {
         }
     }
 }
-$script:LogFile = $LogFile
 
 function Get-LoggedOnUserSid {
-    $cs = Get-CimInstance -ClassName Win32_ComputerSystem
-    if (-not $cs.UserName) { throw "No interactive user detected (Win32_ComputerSystem.UserName is empty)." }
+    $cs = Get-CimInstance Win32_ComputerSystem
+    if (-not $cs.UserName) { throw "No interactive user detected." }
     $nt  = New-Object System.Security.Principal.NTAccount($cs.UserName)
     $sid = $nt.Translate([System.Security.Principal.SecurityIdentifier]).Value
-    [pscustomobject]@{ UserName = $cs.UserName; Sid = $sid }
+    [pscustomobject]@{ User=$cs.UserName; Sid=$sid }
 }
 
-function Get-UserShellFolderPath {
-    param(
-        [Parameter(Mandatory)][string]$Sid,
-        [Parameter(Mandatory)][ValidateSet('Desktop')][string]$Folder
-    )
-    $base = "Registry::HKEY_USERS\$Sid\Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders"
-    $name = 'Desktop'
-    $val  = (Get-ItemProperty -Path $base -Name $name -ErrorAction Stop).$name
-    if (-not $val) { throw "Unable to resolve Desktop path from HKU:\$Sid Shell Folders." }
-    $val
+function Get-DesktopPath {
+    param([string]$Sid)
+    $key = "Registry::HKEY_USERS\$Sid\Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders"
+    (Get-ItemProperty $key -Name Desktop).Desktop
 }
 
-function Get-FileHashSafe {
-    param([Parameter(Mandatory)][string]$Path)
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
-    (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash
-}
-
-function Invoke-DownloadWithRetry {
-    param(
-        [Parameter(Mandatory)][string]$Uri,
-        [Parameter(Mandatory)][string]$OutFile,
-        [int]$MaxAttempts = 3,
-        [int]$DelaySeconds = 2
-    )
-
-    if (Test-Path -LiteralPath $OutFile) {
-        Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
-    }
-
-    for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
-        Write-Log ("Downloading... Attempt {0}/{1}" -f $attempt, $MaxAttempts) "INFO"
+function Invoke-Download {
+    param($Uri,$OutFile)
+    Remove-Item $OutFile -Force -ErrorAction SilentlyContinue
+    for ($i=1;$i -le 3;$i++) {
         try {
-            Invoke-WebRequest -Uri $Uri -OutFile $OutFile -UseBasicParsing -ErrorAction Stop
-            if ((Test-Path -LiteralPath $OutFile) -and ((Get-Item -LiteralPath $OutFile).Length -gt 0)) {
-                Write-Log "Download successful." "OK"
-                return $true
-            }
-            throw "Downloaded file is missing or empty."
+            Write-Log "Downloading ($i/3): $Uri"
+            Invoke-WebRequest $Uri -OutFile $OutFile -UseBasicParsing
+            if ((Get-Item $OutFile).Length -gt 0) { return $true }
         } catch {
-            Write-Log ("Attempt {0}/{1} failed: {2}" -f $attempt, $MaxAttempts, $_.Exception.Message) "WARN"
-            if (Test-Path -LiteralPath $OutFile) {
-                Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
-            }
-            if ($attempt -eq $MaxAttempts) { return $false }
-            Write-Log ("Retrying in {0} seconds..." -f $DelaySeconds) "INFO"
-            Start-Sleep -Seconds $DelaySeconds
+            Write-Log "Download attempt $i failed: $($_.Exception.Message)" "WARN"
+            Start-Sleep 2
         }
     }
     return $false
 }
 
-function Move-Contents {
-    param([Parameter(Mandatory)][string]$Source,[Parameter(Mandatory)][string]$Target)
-    if (-not (Test-Path -LiteralPath $Source)) { return }
-    Get-ChildItem -LiteralPath $Source -Force | ForEach-Object {
-        try { Move-Item -LiteralPath $_.FullName -Destination $Target -Force } catch {
-            Write-Log ("WARN: Failed to move {0} -> {1}: {2}" -f $_.FullName, $Target, $_.Exception.Message) "WARN"
-        }
+function Normalize-Extract {
+    param($Root)
+    $dirs = Get-ChildItem $Root -Directory
+    $files= Get-ChildItem $Root -File
+    if ($dirs.Count -eq 1 -and $files.Count -eq 0) {
+        Get-ChildItem $dirs[0].FullName -Force | Move-Item -Destination $Root -Force
+        Remove-Item $dirs[0].FullName -Recurse -Force
     }
 }
 
-function Normalize-ExtractRoot {
-    param(
-        [Parameter(Mandatory)][string]$ExtractPath,
-        [Parameter(Mandatory)][string]$ZipPath
-    )
-
-    $topDirs  = @(Get-ChildItem -LiteralPath $ExtractPath -Directory -Force -ErrorAction SilentlyContinue)
-    $topFiles = @(Get-ChildItem -LiteralPath $ExtractPath -File -Force -ErrorAction SilentlyContinue |
-        Where-Object { $_.FullName -ne $ZipPath })
-
-    if ($topDirs.Count -eq 1 -and $topFiles.Count -eq 0) {
-        Write-Log ("Normalizing: flattening single folder {0}" -f $topDirs[0].Name) "INFO"
-        Move-Contents -Source $topDirs[0].FullName -Target $ExtractPath
-        try { Remove-Item -LiteralPath $topDirs[0].FullName -Recurse -Force -ErrorAction SilentlyContinue } catch { }
-    } else {
-        Write-Log ("Normalize skipped: topDirs={0} topFiles={1}" -f $topDirs.Count, $topFiles.Count) "INFO"
-    }
-}
-
-function Unblock-AllFiles {
-    param([Parameter(Mandatory)][string]$Root)
-    try {
-        Get-ChildItem -LiteralPath $Root -Recurse -Force -File -ErrorAction SilentlyContinue | ForEach-Object {
-            try { Unblock-File -LiteralPath $_.FullName -ErrorAction SilentlyContinue } catch { }
-        }
-    } catch { }
-}
-
-function Get-AllFilesByExtension {
-    param([Parameter(Mandatory)][string]$Root,[Parameter(Mandatory)][string]$Extension)
-    Get-ChildItem -LiteralPath $Root -Recurse -File -ErrorAction Stop |
-        Where-Object { $_.Extension -ieq $Extension }
-}
-
-function Copy-AllFiles {
-    param(
-        [Parameter(Mandatory)][System.IO.FileInfo[]]$Files,
-        [Parameter(Mandatory)][string]$Destination
-    )
-    Ensure-Dir $Destination
-
-    $copied = @()
+function Copy-All {
+    param($Files,$Dest)
+    Ensure-Dir $Dest
+    $out=@()
     foreach ($f in $Files) {
-        $dest = Join-Path $Destination $f.Name
-        try {
-            Copy-Item -LiteralPath $f.FullName -Destination $dest -Force -ErrorAction Stop
-            $copied += $dest
-            Write-Log "Copied (overwrote if existed): $($f.FullName) -> $dest" "OK"
-        } catch {
-            Write-Log ("WARN: Failed to copy (overwrite) {0} -> {1}: {2}" -f $f.FullName, $dest, $_.Exception.Message) "WARN"
-        }
+        $d = Join-Path $Dest $f.Name
+        Copy-Item $f.FullName $d -Force
+        Write-Log "Copied: $($f.Name) -> $Dest" "OK"
+        $out += $d
     }
-    return $copied
+    $out
 }
 
 # ------------------------- Summary -------------------------
 $summary = [ordered]@{
-    startedAt           = (Get-Date).ToString('o')
-    zipUrl              = $ZipUrl
-    downloadedZip       = $null
-    downloadSha256      = $null
-    extractTo           = $null
-    interactiveUser     = $null
-    userSid             = $null
-    userDesktop         = $null
-
-    deployRoot          = $DeployRoot
-    collectedInfoDir    = $CollectedInfoDir
-    workRoot            = $WorkRoot
-
-    lnkCountFound       = 0
-    ps1CountFound       = 0
-    icoCountFound       = 0
-
-    copiedLnkToDesktop  = @()
-    copiedPs1ToDecrypt  = @()
-    copiedIcoToDecrypt  = @()
-
-    result              = "UNKNOWN"
+    startedAt = (Get-Date).ToString('o')
+    zipUrl = $ZipUrl
+    launcherRoot = $LauncherRoot
+    collectedInfo = $CollectedInfo
+    workRoot = $WorkRoot
+    result = "UNKNOWN"
 }
 
-Write-Log "Starting. ZipUrl='$ZipUrl' Silent=$Silent ExportOnly=$ExportOnly" "INFO"
-Write-Log "Landing: DeployRoot='$DeployRoot' CollectedInfoDir='$CollectedInfoDir' WorkRoot='$WorkRoot'" "INFO"
+Write-Log "Starting Decryptor Desktop Icon deploy"
 
 try {
-    try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch { }
-
     $user = Get-LoggedOnUserSid
-    $summary.interactiveUser = $user.UserName
-    $summary.userSid = $user.Sid
-    Write-Log "Interactive user: $($user.UserName) SID=$($user.Sid)" "INFO"
+    $desktop = Get-DesktopPath $user.Sid
+    Write-Log "Interactive user: $($user.User)"
 
-    $desktopPath = Get-UserShellFolderPath -Sid $user.Sid -Folder Desktop
-    $summary.userDesktop = $desktopPath
-    Write-Log "Resolved Desktop: $desktopPath" "OK"
+    $zip = Join-Path $WorkRoot ("launchers_{0}.zip" -f (Get-Date -Format yyyyMMddHHmmss))
+    if (-not (Invoke-Download $ZipUrl $zip)) {
+        throw "Download failed after retries."
+    }
 
-    $stamp   = (Get-Date -Format "yyyyMMdd_HHmmss")
-    $shortId = ([guid]::NewGuid().ToString("N").Substring(0,8))
+    $extract = Join-Path $WorkRoot ([guid]::NewGuid().ToString())
+    Expand-Archive $zip $extract -Force
+    Normalize-Extract $extract
 
-    # Work paths (changed)
-    $zipPath = Join-Path $WorkRoot ("Toolbox-Launchers_{0}_{1}.zip" -f $stamp, $shortId)
-    $extract = Join-Path $WorkRoot ("CS-Decryptor-Extract_{0}_{1}" -f $stamp, $shortId)
+    $ps1 = Get-ChildItem $extract -Recurse -Filter *.ps1
+    $ico = Get-ChildItem $extract -Recurse -Filter *.ico
+    $lnk = Get-ChildItem $extract -Recurse -Filter *.lnk
 
-    $ok = Invoke-DownloadWithRetry -Uri $ZipUrl -OutFile $zipPath -MaxAttempts 3 -DelaySeconds 2
-    if (-not $ok) { throw "Download did not succeed after 3 attempts." }
-
-    $summary.downloadedZip  = $zipPath
-    $summary.downloadSha256 = Get-FileHashSafe -Path $zipPath
-    Write-Log "Downloaded ZIP SHA256: $($summary.downloadSha256)" "OK"
-
-    if (Test-Path -LiteralPath $extract) { Remove-Item -LiteralPath $extract -Recurse -Force -ErrorAction SilentlyContinue }
-    Ensure-Dir $extract
-
-    Write-Log "Extracting to: $extract" "INFO"
-    Expand-Archive -Path $zipPath -DestinationPath $extract -Force
-    Write-Log "Extract complete." "OK"
-
-    $summary.extractTo = $extract
-
-    Normalize-ExtractRoot -ExtractPath $extract -ZipPath $zipPath
-    Unblock-AllFiles -Root $extract
-
-    $lnkFiles = @(Get-AllFilesByExtension -Root $extract -Extension ".lnk")
-    $ps1Files = @(Get-AllFilesByExtension -Root $extract -Extension ".ps1")
-    $icoFiles = @(Get-AllFilesByExtension -Root $extract -Extension ".ico")
-
-    $summary.lnkCountFound = $lnkFiles.Count
-    $summary.ps1CountFound = $ps1Files.Count
-    $summary.icoCountFound = $icoFiles.Count
-
-    Write-Log "Found .lnk files: $($lnkFiles.Count)" "OK"
-    Write-Log "Found .ps1 files: $($ps1Files.Count)" "OK"
-    Write-Log "Found .ico files: $($icoFiles.Count)" "OK"
+    $summary.ps1Count = $ps1.Count
+    $summary.icoCount = $ico.Count
+    $summary.lnkCount = $lnk.Count
 
     if ($ExportOnly) {
         $summary.result = "EXPORTONLY"
-        $summary.finishedAt = (Get-Date).ToString('o')
-        ($summary | ConvertTo-Json -Depth 14) | Set-Content -Path $ExportJson -Encoding UTF8
-        if (-not $Silent) { Write-Host "Exported: $ExportJson" }
-        exit 0
+    } else {
+        if ($ps1) { $summary.ps1Copied = Copy-All $ps1 $LauncherRoot }
+        if ($ico) { $summary.icoCopied = Copy-All $ico $LauncherRoot }
+        if ($lnk) { $summary.lnkCopied = Copy-All $lnk $desktop }
+        $summary.result = "SUCCESS"
     }
-
-    if ($ps1Files.Count -gt 0) { $summary.copiedPs1ToDecrypt = Copy-AllFiles -Files $ps1Files -Destination $DeployRoot }
-    if ($icoFiles.Count -gt 0) { $summary.copiedIcoToDecrypt = Copy-AllFiles -Files $icoFiles -Destination $DeployRoot }
-    if ($lnkFiles.Count -gt 0) { $summary.copiedLnkToDesktop = Copy-AllFiles -Files $lnkFiles -Destination $desktopPath }
-
-    $summary.result = "SUCCESS"
 }
 catch {
     $summary.result = "FAILED"
-    $summary.error  = $_.Exception.Message
+    $summary.error = $_.Exception.Message
     Write-Log "FAILED: $($summary.error)" "ERROR"
     if (-not $Silent) { throw }
 }
 finally {
     $summary.finishedAt = (Get-Date).ToString('o')
-    ($summary | ConvertTo-Json -Depth 14) | Set-Content -Path $ExportJson -Encoding UTF8
-    Write-Log "Summary exported to: $ExportJson" "INFO"
-    Write-Log "Done. Result=$($summary.result)" "INFO"
+    $summary | ConvertTo-Json -Depth 12 | Set-Content $ExportJson -Encoding UTF8
+    Write-Log "Summary written to $ExportJson"
 }
 
 exit 0
