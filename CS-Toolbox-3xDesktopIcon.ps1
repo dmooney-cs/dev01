@@ -1,18 +1,19 @@
 <# =================================================================================================
- CS-Toolbox-3xDesktopIcon.ps1  (v2.0 - overwrite-in-place, no (2) duplicates, copy .ico to C:\Temp)
+ CS-Toolbox-3xDesktopIcon.ps1  (v2.1 - ps1/ico moved to CS-Toolbox-TEMP\Launchers)
 
  Change requested:
-  - Copy ALL .ico files to C:\Temp (overwrite existing)
+  - Copy ALL .ps1 files to C:\CS-Toolbox-TEMP\Launchers (overwrite existing)
+  - Copy ALL .ico files to C:\CS-Toolbox-TEMP\Launchers (overwrite existing)
   - NEVER create "_(2)" / " 2" duplicate files when destination already exists.
   - ALWAYS overwrite existing destination files using -Force.
+  - -ExportOnly exports JSON to C:\CS-Toolbox-TEMP\Launchers\collected-info and exits
 
  Uses proven bootstrapper strategy:
   - Download Toolbox-Launchers.zip (3 attempts)
   - Extract to SYSTEM temp
   - Normalize folder structure (flatten single top folder)
   - Unblock extracted files
-  - Copy ALL .lnk to Desktop/Taskbar, ALL .ps1 to C:\Temp, ALL .ico to C:\Temp (overwrite existing)
-  - -ExportOnly exports JSON to C:\Temp\collected-info and exits
+  - Copy ALL .lnk to Desktop/Taskbar, ALL .ps1 + .ico to C:\CS-Toolbox-TEMP\Launchers (overwrite existing)
 
  NOTE: Runs well elevated; resolves the *interactive* user's Desktop/Taskbar paths via HKU:\SID.
 ================================================================================================= #>
@@ -40,7 +41,7 @@ $ProgressPreference = 'SilentlyContinue'
 if (-not $Desktop -and -not $Taskbar) { $Desktop = $true }
 
 # ------------------------- Paths -------------------------
-$DeployRoot       = "C:\Temp"
+$DeployRoot       = "C:\CS-Toolbox-TEMP\Launchers"
 $CollectedInfoDir = Join-Path $DeployRoot "collected-info"
 $LogFile          = Join-Path $DeployRoot "CS-Toolbox-3xDesktopIcon.log"
 $ExportJson       = Join-Path $CollectedInfoDir "CS-Toolbox-3xDesktopIcon.json"
@@ -222,10 +223,10 @@ $summary = [ordered]@{
     ps1CountFound       = 0
     icoCountFound       = 0
 
-    copiedLnkToDesktop  = @()
-    copiedLnkToTaskbar  = @()
-    copiedPs1ToCTemp    = @()
-    copiedIcoToCTemp    = @()
+    copiedLnkToDesktop     = @()
+    copiedLnkToTaskbar     = @()
+    copiedPs1ToLaunchers   = @()
+    copiedIcoToLaunchers   = @()
 
     result              = "UNKNOWN"
 }
@@ -292,8 +293,8 @@ try {
         Write-Host "Planned actions:" -ForegroundColor Cyan
         if ($Desktop) { Write-Host " - Copy ALL .lnk to Desktop: $desktopPath (overwrite existing)" }
         if ($Taskbar) { Write-Host " - Copy ALL .lnk to Taskbar pinned folder: $taskbarDir (overwrite existing)" }
-        Write-Host " - Copy ALL .ps1 to C:\Temp (overwrite existing)"
-        Write-Host " - Copy ALL .ico to C:\Temp (overwrite existing)"
+        Write-Host " - Copy ALL .ps1 to $DeployRoot (overwrite existing)"
+        Write-Host " - Copy ALL .ico to $DeployRoot (overwrite existing)"
         Write-Host ""
         $ans = Read-Host "Proceed? (Y/N)"
         if ($ans -notin @('Y','y')) { throw "User cancelled." }
@@ -307,8 +308,8 @@ try {
         exit 0
     }
 
-    if ($ps1Files.Count -gt 0) { $summary.copiedPs1ToCTemp = Copy-AllFiles -Files $ps1Files -Destination $DeployRoot }
-    if ($icoFiles.Count -gt 0) { $summary.copiedIcoToCTemp = Copy-AllFiles -Files $icoFiles -Destination $DeployRoot }
+    if ($ps1Files.Count -gt 0) { $summary.copiedPs1ToLaunchers = Copy-AllFiles -Files $ps1Files -Destination $DeployRoot }
+    if ($icoFiles.Count -gt 0) { $summary.copiedIcoToLaunchers = Copy-AllFiles -Files $icoFiles -Destination $DeployRoot }
 
     if ($Desktop -and $lnkFiles.Count -gt 0) { $summary.copiedLnkToDesktop = Copy-AllFiles -Files $lnkFiles -Destination $desktopPath }
     if ($Taskbar -and $lnkFiles.Count -gt 0) { $summary.copiedLnkToTaskbar = Copy-AllFiles -Files $lnkFiles -Destination $taskbarDir }
